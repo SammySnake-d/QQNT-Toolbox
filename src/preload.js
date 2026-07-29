@@ -39,6 +39,7 @@ const CHANNEL_REGISTER_POKE_ACCOUNT = 'qqnt-toolbox:register-poke-account';
 const CHANNEL_CLEAR_RECALL_CACHE = 'qqnt-toolbox:clear-recall-cache';
 const CHANNEL_OPEN_RECALL_DIR = 'qqnt-toolbox:open-recall-dir';
 const CHANNEL_OPEN_RECALL_IMAGE_DIR = 'qqnt-toolbox:open-recall-image-dir';
+const CHANNEL_OPEN_AUTO_DOWNLOAD_FILES_DIR = 'qqnt-toolbox:open-auto-download-files-dir';
 const CHANNEL_VIEW_RECALL_MESSAGES = 'qqnt-toolbox:view-recall-messages';
 const CHANNEL_GET_RECALL_CONTACTS = 'qqnt-toolbox:get-recall-contacts';
 const CHANNEL_GET_UPDATE_STATE = 'qqnt-toolbox:get-update-state';
@@ -81,6 +82,7 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     clearRecallCache: () => ipcRenderer.invoke(CHANNEL_CLEAR_RECALL_CACHE),
     openRecallDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_DIR),
     openRecallImageDir: () => ipcRenderer.invoke(CHANNEL_OPEN_RECALL_IMAGE_DIR),
+    openAutoDownloadFilesDir: () => ipcRenderer.invoke(CHANNEL_OPEN_AUTO_DOWNLOAD_FILES_DIR),
     viewRecallMessages: () => ipcRenderer.invoke(CHANNEL_VIEW_RECALL_MESSAGES),
     getRecallContacts: () => ipcRenderer.invoke(CHANNEL_GET_RECALL_CONTACTS),
     getUpdateState: () => ipcRenderer.invoke(CHANNEL_GET_UPDATE_STATE),

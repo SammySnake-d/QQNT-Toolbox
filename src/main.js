@@ -23,6 +23,10 @@ const {
     shouldHandlePreventRecallRecord
 } = require('./prevent-recall');
 const {
+    normalizeAutoDownloadFileConfig,
+    collectAutoDownloadFileTargets
+} = require('./auto-download-file');
+const {
     createRepeatMessageHandler,
     mapWithConcurrency
 } = require('./repeat-message');
@@ -175,6 +179,7 @@ const {
     CHANNEL_CLEAR_RECALL_CACHE,
     CHANNEL_OPEN_RECALL_DIR,
     CHANNEL_OPEN_RECALL_IMAGE_DIR,
+    CHANNEL_OPEN_AUTO_DOWNLOAD_FILES_DIR,
     CHANNEL_VIEW_RECALL_MESSAGES,
     CHANNEL_GET_RECALL_CONTACTS,
     CHANNEL_GET_RECALL_VIEWER_DATA,
@@ -356,6 +361,15 @@ const DEFAULT_CONFIG = {
             dark: '#c70000'
         }
     },
+    autoDownloadFiles: {
+        enabled: false,
+        minSizeValue: 1,
+        minSizeUnit: 'KB',
+        maxSizeEnabled: false,
+        maxSizeValue: 100,
+        maxSizeUnit: 'MB',
+        filterPeers: []
+    },
     interfaceTweaks: {
         inlineMediaViewer: false,
         inlineMediaBackground: 'black',
@@ -431,6 +445,7 @@ const localStickerCache = {
 const networkSessions = new Map();
 let localStickerDownloadPromise = null;
 const recallStates = new Map();
+const autoDownloadFileStates = new Map();
 let configCache = null;
 let recallViewerWindow = null;
 let mediaViewerWindow = null;
@@ -773,6 +788,11 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             filterMode: config.preventRecall?.filterMode,
             filterPeers: config.preventRecall?.filterPeers?.length || 0
         },
+        autoDownloadFiles: {
+            enabled: config.autoDownloadFiles?.enabled === true,
+            maxSizeEnabled: config.autoDownloadFiles?.maxSizeEnabled === true,
+            filterPeers: config.autoDownloadFiles?.filterPeers?.length || 0
+        },
         poke: {
             autoReply: config.entertainment?.autoPokeBack === true,
             autoReplyLimit: Math.max(0, Number(config.entertainment?.autoPokeBackLimit) || 0),
@@ -858,6 +878,15 @@ function getPreventRecallCachePath(accountUin) {
 function getPreventRecallImageDir(accountUin) {
     const directory = getPreventRecallDir(accountUin);
     return directory ? path.join(directory, 'images') : '';
+}
+
+function getAutoDownloadFilesRootDir() {
+    return path.join(getPluginDataDir(), 'auto-download-files');
+}
+
+function getAutoDownloadFilesDir(accountUin) {
+    const normalized = normalizeUin(accountUin);
+    return normalized ? path.join(getAutoDownloadFilesRootDir(), normalized) : '';
 }
 
 function getConfigPath() {
@@ -1060,6 +1089,7 @@ function normalizeSimplifyConfig(config) {
     config.topFuncBar = normalizeSimplifyItemList(config.topFuncBar, 'top-func');
     config.chatFuncBar = normalizeSimplifyItemList(config.chatFuncBar, 'chat-func');
     config.preventRecall = normalizePreventRecallConfig(config.preventRecall);
+    config.autoDownloadFiles = normalizeAutoDownloadFileConfig(config.autoDownloadFiles);
     config.entertainment.autoReaction = normalizeAutoReactionConfig(
         config.entertainment.autoReaction
     );
@@ -1179,6 +1209,10 @@ function getFakeVoiceDurationSeconds() {
 
 function getPreventRecallConfig() {
     return getConfig().preventRecall;
+}
+
+function getAutoDownloadFilesConfig() {
+    return getConfig().autoDownloadFiles;
 }
 
 function getEntertainmentConfig() {
@@ -3035,6 +3069,10 @@ function installConfigIpc() {
     ipcMain.handle(CHANNEL_OPEN_RECALL_IMAGE_DIR, async event => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         return await openPreventRecallImageDir(await resolveRecallAccount(browserWindow));
+    });
+    ipcMain.handle(CHANNEL_OPEN_AUTO_DOWNLOAD_FILES_DIR, async event => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        return await openAutoDownloadFilesDir(await resolveRecallAccount(browserWindow));
     });
     ipcMain.handle(CHANNEL_VIEW_RECALL_MESSAGES, async event => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
@@ -6048,6 +6086,145 @@ function preserveRecoveredRecallMetadata(recallState, record) {
     return true;
 }
 
+function getAutoDownloadFileState(accountUin) {
+    const normalized = normalizeUin(accountUin);
+    if (!normalized) {
+        return null;
+    }
+    let state = autoDownloadFileStates.get(normalized);
+    if (!state) {
+        state = {
+            accountUin: normalized,
+            completed: new Set(),
+            inFlight: new Set()
+        };
+        autoDownloadFileStates.set(normalized, state);
+    }
+    return state;
+}
+
+function getAutoDownloadTargetPath(directory, target) {
+    const identity = normalizeText(target?.identity)
+        .replace(/[^a-z0-9:_-]/gi, '_')
+        .slice(0, 96) || crypto.randomBytes(8).toString('hex');
+    const extension = path.extname(normalizeText(target?.fileName)).slice(0, 16);
+    return path.join(directory, `${identity}${extension}`);
+}
+
+async function persistAutoDownloadedFile(target, sourcePath, targetPath) {
+    if (!sourcePath || !targetPath) {
+        return '';
+    }
+    if (normalizeComparablePath(sourcePath) === normalizeComparablePath(targetPath)) {
+        return targetPath;
+    }
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const sourceSize = (await fs.stat(sourcePath)).size;
+    let targetSize = -1;
+    try {
+        targetSize = (await fs.stat(targetPath)).size;
+    } catch {
+    }
+    if (sourceSize > targetSize) {
+        const temporaryPath = `${targetPath}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+        try {
+            await fs.copyFile(sourcePath, temporaryPath);
+            await fs.rm(targetPath, { force: true });
+            await fs.rename(temporaryPath, targetPath);
+        } finally {
+            await fs.rm(temporaryPath, { force: true }).catch(() => {});
+        }
+    }
+    try {
+        return (await fs.stat(targetPath)).isFile() ? targetPath : '';
+    } catch {
+        return '';
+    }
+}
+
+async function downloadAutoDownloadFile(browserWindow, record, target) {
+    const pathCandidates = [
+        target.fileElement?.filePath,
+        target.fileElement?.sourcePath,
+        target.fileElement?.originPath,
+        target.fileElement?.localPath,
+        target.fileElement?.path
+    ];
+    const existing = await getExistingFilePathAsync(pathCandidates);
+    if (existing) {
+        return existing;
+    }
+    const result = await invokeForwardDetailMediaDownload(browserWindow, record, target.element);
+    if (isRepeatCommandFailure(result)) {
+        throw new Error(`auto download failed: ${safeJson(result)}`);
+    }
+    const localUrl = getViewerFileUrl(result, ...pathCandidates);
+    if (localUrl) {
+        return fileURLToPath(localUrl);
+    }
+    return await waitForForwardDetailFile(pathCandidates, browserWindow);
+}
+
+async function archiveAutoDownloadFile(browserWindow, state, directory, record, target) {
+    if (state.completed.has(target.identity) || state.inFlight.has(target.identity)) {
+        return;
+    }
+    state.inFlight.add(target.identity);
+    try {
+        const sourcePath = await downloadAutoDownloadFile(browserWindow, record, target);
+        if (!sourcePath) {
+            throw new Error('QQ did not return a downloaded file path.');
+        }
+        const targetPath = await persistAutoDownloadedFile(
+            target,
+            sourcePath,
+            getAutoDownloadTargetPath(directory, target)
+        );
+        if (targetPath) {
+            state.completed.add(target.identity);
+            recordDiagnostic('info', 'auto-download.file-saved', {
+                fileName: target.fileName,
+                fileSize: target.fileSize
+            });
+        }
+    } catch (error) {
+        recordDiagnostic('warn', 'auto-download.file-failed', {
+            fileName: target.fileName,
+            error: error?.message || String(error)
+        });
+    } finally {
+        state.inFlight.delete(target.identity);
+    }
+}
+
+async function processAutoDownloadFiles(browserWindow, context) {
+    const config = getAutoDownloadFilesConfig();
+    if (config?.enabled !== true) {
+        return;
+    }
+    const accountUin = normalizeUin(getWindowState(browserWindow).selfUin);
+    const state = getAutoDownloadFileState(accountUin);
+    const directory = getAutoDownloadFilesDir(accountUin);
+    if (!state || !directory) {
+        return;
+    }
+    const tasks = [];
+    for (const record of context.records) {
+        if (getRecallInfo(record)) {
+            continue;
+        }
+        for (const target of collectAutoDownloadFileTargets(config, record)) {
+            if (state.completed.has(target.identity) || state.inFlight.has(target.identity)) {
+                continue;
+            }
+            tasks.push(archiveAutoDownloadFile(browserWindow, state, directory, record, target));
+        }
+    }
+    if (tasks.length) {
+        await Promise.allSettled(tasks);
+    }
+}
+
 function processPreventRecall(browserWindow, context) {
     rememberPokeAccountFromRecords(browserWindow, context.records);
     const recallState = getRecallState(getWindowState(browserWindow).selfUin, false);
@@ -6126,6 +6303,15 @@ async function openPreventRecallDir(accountUin) {
 
 async function openPreventRecallImageDir(accountUin) {
     const directory = getPreventRecallImageDir(accountUin);
+    if (!directory) {
+        throw new Error('Current QQ account was not found.');
+    }
+    await fs.mkdir(directory, { recursive: true });
+    return await shell.openPath(directory);
+}
+
+async function openAutoDownloadFilesDir(accountUin) {
+    const directory = getAutoDownloadFilesDir(accountUin);
     if (!directory) {
         throw new Error('Current QQ account was not found.');
     }
@@ -8424,6 +8610,9 @@ function handleNativeSend(browserWindow, channel, args) {
     Promise.resolve()
         .then(() => processAutoReactionUpdates(browserWindow, context))
         .catch(error => warn('auto reaction processing failed:', error?.message || error));
+    Promise.resolve()
+        .then(() => processAutoDownloadFiles(browserWindow, context))
+        .catch(error => warn('auto download processing failed:', error?.message || error));
     const windowShakeArmed = windowShakeController.arm(
         browserWindow,
         context,

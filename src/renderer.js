@@ -276,6 +276,7 @@ let handleToolboxVueComponentMount = () => {};
     let fakeForwardEditor = null;
     let windowShakeSending = false;
     let recallFilterEditor = null;
+    let autoDownloadPeerEditor = null;
     let autoReactionEditor = null;
     let localStickerController = null;
     let localStickerManager = null;
@@ -724,6 +725,22 @@ let handleToolboxVueComponentMount = () => {};
             });
         }
         return recallFilterEditor;
+    }
+
+    function getAutoDownloadPeerEditor() {
+        if (!autoDownloadPeerEditor) {
+            autoDownloadPeerEditor = createRecallFilterEditor({
+                getContacts: () => (getBridge()?.getRecallContacts?.() || [])
+                    .filter(contact => Number(contact?.chatType) === 2),
+                getMode: () => 'whitelist',
+                getSelected: () => currentConfig.autoDownloadFiles.filterPeers,
+                save: peers => setConfigValue(
+                    'autoDownloadFiles.filterPeers',
+                    peers.filter(peer => Number(peer?.chatType) === 2)
+                )
+            });
+        }
+        return autoDownloadPeerEditor;
     }
 
     function getAutoReactionEditor() {
@@ -2370,6 +2387,52 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     danger: true
                 })
             ]),
+            createSection('autoDownloadFiles', text('自动下载文件'), [
+                createSwitchItem(text('启用'), text('自动下载指定群聊的文件并本地留存'), 'autoDownloadFiles.enabled'),
+                createActionItem(text('群聊名单'), text('仅从群列表中选择，留空则不下载'), 'manageAutoDownloadPeers', {
+                    label: text('管理'),
+                    requires: 'autoDownloadFiles.enabled',
+                    child: true
+                }),
+                createNumberItem(text('大小下限'), text('小于该大小的文件不下载'), 'autoDownloadFiles.minSizeValue', {
+                    min: 0,
+                    max: 1048576,
+                    maxLength: 7,
+                    requires: 'autoDownloadFiles.enabled',
+                    child: true
+                }),
+                createChoiceItem(text('下限单位'), text('选择大小下限的单位'), 'autoDownloadFiles.minSizeUnit', [
+                    { value: 'B', label: 'B' },
+                    { value: 'KB', label: 'KB' },
+                    { value: 'MB', label: 'MB' }
+                ], {
+                    requires: 'autoDownloadFiles.enabled',
+                    child: true
+                }),
+                createSwitchItem(text('启用大小上限'), text('关闭则不限制上限'), 'autoDownloadFiles.maxSizeEnabled', {
+                    requires: 'autoDownloadFiles.enabled',
+                    child: true
+                }),
+                createNumberItem(text('大小上限'), text('大于该大小的文件不下载'), 'autoDownloadFiles.maxSizeValue', {
+                    min: 0,
+                    max: 1048576,
+                    maxLength: 7,
+                    requires: 'autoDownloadFiles.enabled|autoDownloadFiles.maxSizeEnabled',
+                    child: true
+                }),
+                createChoiceItem(text('上限单位'), text('选择大小上限的单位'), 'autoDownloadFiles.maxSizeUnit', [
+                    { value: 'B', label: 'B' },
+                    { value: 'KB', label: 'KB' },
+                    { value: 'MB', label: 'MB' }
+                ], {
+                    requires: 'autoDownloadFiles.enabled|autoDownloadFiles.maxSizeEnabled',
+                    child: true
+                }),
+                createActionItem(text('查看下载文件'), text('打开自动下载文件的储存目录'), 'openAutoDownloadFilesDir', {
+                    label: text('打开'),
+                    child: true
+                })
+            ]),
             createSection('entertainment', text('娱乐互动'), [
                 createSwitchItem(text('移除表情回应限制'), text('补全回应窗口中被隐藏的 emoji'), 'messageTweaks.removeReactionLimit'),
                 createSwitchItem(text('回应后不关闭回应窗口'), text('便于连续添加或取消回应'), 'messageTweaks.keepReactionPanelOpen'),
@@ -3045,12 +3108,16 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                 result = await bridge?.openRecallDir?.();
             } else if (action === 'openRecallImageDir') {
                 result = await bridge?.openRecallImageDir?.();
+            } else if (action === 'openAutoDownloadFilesDir') {
+                result = await bridge?.openAutoDownloadFilesDir?.();
             } else if (action === 'viewRecallMessages') {
                 result = await bridge?.viewRecallMessages?.();
             } else if (action === 'clearRecallCache') {
                 result = await bridge?.clearRecallCache?.();
             } else if (action === 'manageRecallFilterPeers') {
                 getRecallFilterEditor().open(button);
+            } else if (action === 'manageAutoDownloadPeers') {
+                getAutoDownloadPeerEditor().open(button);
             } else if (action === 'editMessageContextMenuOrder') {
                 getMessageContextMenuOrderController().openEditor();
             } else if (action === 'chooseMessageImageDirectory') {
