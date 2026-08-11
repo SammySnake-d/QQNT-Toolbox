@@ -1,11 +1,13 @@
 'use strict';
 
 const crypto = require('crypto');
-const { gunzipSync, gzipSync } = require('zlib');
+const { deflateSync, gunzipSync, gzipSync, inflateSync } = require('zlib');
 
 const MAX_FAKE_FORWARD_MESSAGES = 100;
 const MAX_FAKE_FORWARD_TEXT_LENGTH = 10000;
 const MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE = 20;
+const MAX_FAKE_FORWARD_DEPTH = 3;
+const MAX_FAKE_FORWARD_TOTAL_MESSAGES = 300;
 const MIN_MESSAGE_TIME_SECONDS = 946684800;
 const MAX_MESSAGE_TIME_SECONDS = 4133980800;
 const MAX_UIN = 0xffffffffn;
@@ -45,15 +47,15 @@ function normalizePeer(value) {
     };
 }
 
-function buildFakeForwardImageUploadParams(peer, filePath) {
-    return buildFakeForwardRichMediaUploadParams(peer, filePath, 'image');
+function buildFakeForwardImageUploadParams(peer, filePath, transferId) {
+    return buildFakeForwardRichMediaUploadParams(peer, filePath, 'image', transferId);
 }
 
-function buildFakeForwardVideoUploadParams(peer, filePath) {
-    return buildFakeForwardRichMediaUploadParams(peer, filePath, 'video');
+function buildFakeForwardVideoUploadParams(peer, filePath, transferId) {
+    return buildFakeForwardRichMediaUploadParams(peer, filePath, 'video', transferId);
 }
 
-function buildFakeForwardRichMediaUploadParams(peer, filePath, type) {
+function buildFakeForwardRichMediaUploadParams(peer, filePath, type, transferId) {
     const normalizedPeer = normalizePeer(peer);
     const normalizedPath = normalizeText(filePath);
     if (!normalizedPath) {
@@ -62,8 +64,14 @@ function buildFakeForwardRichMediaUploadParams(peer, filePath, type) {
     if (type !== 'image' && type !== 'video') {
         throw new TypeError('Unsupported rich-media type.');
     }
+    const normalizedTransferId = Number(transferId);
+    if (!Number.isSafeInteger(normalizedTransferId) ||
+        normalizedTransferId <= 0 || normalizedTransferId > 0x7fffffff) {
+        throw new TypeError('A positive 32-bit media transfer ID is required.');
+    }
     const group = normalizedPeer.chatType === 2;
     return {
+        transferId: normalizedTransferId,
         filePath: normalizedPath,
         bizType: type === 'video'
             ? (group ? 7 : 6)
@@ -148,7 +156,40 @@ function normalizeFakeForwardFile(file, messageIndex) {
     };
 }
 
-function normalizeFakeForwardSegments(source, messageIndex) {
+function normalizeFakeForwardUuid(value) {
+    const uuid = normalizeText(value);
+    return uuid && uuid !== 'MultiMsg' && /^[a-z0-9._-]{1,128}$/i.test(uuid)
+        ? uuid
+        : crypto.randomUUID();
+}
+
+function normalizeFakeForwardNested(segment, messageIndex, options, context) {
+    const resId = normalizeText(segment?.resId);
+    if (!resId && options.allowUnuploadedNested !== true) {
+        throw new TypeError(`第 ${messageIndex + 1} 条消息的嵌套聊天记录尚未上传。`);
+    }
+    const uuid = normalizeFakeForwardUuid(segment?.uuid || segment?.id);
+    if (context.fileNames.has(uuid)) {
+        throw new TypeError(`第 ${messageIndex + 1} 条消息的嵌套聊天记录标识重复。`);
+    }
+    context.fileNames.add(uuid);
+    const messages = normalizeFakeForwardMessages(segment?.messages, options, {
+        depth: context.depth + 1,
+        total: context.total,
+        fileNames: context.fileNames
+    });
+    return {
+        type: 'forward',
+        uuid,
+        resId,
+        messages,
+        source: normalizeText(segment?.source),
+        summary: normalizeText(segment?.summary),
+        prompt: normalizeText(segment?.prompt) || '[聊天记录]'
+    };
+}
+
+function normalizeFakeForwardSegments(source, messageIndex, options, context) {
     const rawSegments = Array.isArray(source?.segments)
         ? source.segments
         : [
@@ -193,29 +234,47 @@ function normalizeFakeForwardSegments(source, messageIndex) {
             segments.push(normalizeFakeForwardFile(segment, messageIndex));
             continue;
         }
+        if (segment?.type === 'forward') {
+            if (context.depth >= MAX_FAKE_FORWARD_DEPTH) {
+                throw new RangeError(`第 ${messageIndex + 1} 条消息的聊天记录嵌套超过 ${MAX_FAKE_FORWARD_DEPTH} 层。`);
+            }
+            segments.push(normalizeFakeForwardNested(segment, messageIndex, options, context));
+            continue;
+        }
         throw new TypeError(`第 ${messageIndex + 1} 条消息包含不支持的内容。`);
     }
     if (textLength > MAX_FAKE_FORWARD_TEXT_LENGTH) {
         throw new RangeError(`第 ${messageIndex + 1} 条消息超过 ${MAX_FAKE_FORWARD_TEXT_LENGTH} 个字符。`);
     }
-    const standalone = segments.filter(segment => segment.type === 'video' || segment.type === 'file');
+    const standalone = segments.filter(segment =>
+        segment.type === 'video' || segment.type === 'file' || segment.type === 'forward'
+    );
     if (standalone.length && (standalone.length !== 1 || segments.length !== 1)) {
-        throw new TypeError(`第 ${messageIndex + 1} 条消息中的视频或文件必须单独发送。`);
+        throw new TypeError(`第 ${messageIndex + 1} 条消息中的视频、文件或嵌套聊天记录必须单独发送。`);
     }
     return segments;
 }
 
-function normalizeFakeForwardMessages(messages, options = {}) {
+function normalizeFakeForwardMessages(messages, options = {}, context = null) {
     if (!Array.isArray(messages) || messages.length === 0) {
         throw new TypeError('至少需要一条消息。');
     }
     if (messages.length > MAX_FAKE_FORWARD_MESSAGES) {
         throw new RangeError(`一次最多生成 ${MAX_FAKE_FORWARD_MESSAGES} 条消息。`);
     }
+    const current = context || {
+        depth: 0,
+        total: { count: 0 },
+        fileNames: new Set(['MultiMsg'])
+    };
+    current.total.count += messages.length;
+    if (current.total.count > MAX_FAKE_FORWARD_TOTAL_MESSAGES) {
+        throw new RangeError(`嵌套聊天记录合计最多包含 ${MAX_FAKE_FORWARD_TOTAL_MESSAGES} 条消息。`);
+    }
     const now = Number(options.now) || Date.now();
     return messages.map((source, index) => {
         const senderUin = normalizeUin(source?.senderUin);
-        const segments = normalizeFakeForwardSegments(source, index);
+        const segments = normalizeFakeForwardSegments(source, index, options, current);
         const content = segments.filter(segment => segment.type === 'text').map(segment => segment.text).join('');
         const images = segments.filter(segment => segment.type === 'image').map(segment => ({
             name: segment.name,
@@ -225,7 +284,7 @@ function normalizeFakeForwardMessages(messages, options = {}) {
             throw new TypeError(`第 ${index + 1} 条消息的发送者 QQ 号无效。`);
         }
         if (!content.trim() && !images.length && !segments.some(segment =>
-            segment.type === 'video' || segment.type === 'file'
+            segment.type === 'video' || segment.type === 'file' || segment.type === 'forward'
         )) {
             throw new TypeError(`第 ${index + 1} 条消息没有内容。`);
         }
@@ -316,6 +375,10 @@ async function getProtocol() {
                 serviceType: ProtoField(1, 'uint32'),
                 pbElem: ProtoField(2, 'bytes'),
                 businessType: ProtoField(3, 'uint32')
+            }, 'optional'),
+            lightAppElem: ProtoField(51, {
+                data: ProtoField(1, 'bytes'),
+                msgResid: ProtoField(2, 'bytes', 'optional')
             }, 'optional')
         });
         const GroupFileExtra = ProtoMessage.of({
@@ -494,9 +557,65 @@ function makePreviewText(message) {
         if (segment.type === 'file') {
             return `[文件] ${segment.name}`;
         }
+        if (segment.type === 'forward') {
+            return '[聊天记录]';
+        }
         return segment.text;
     }).join('').replace(/\s+/g, ' ').trim();
     return `${message.senderName}: ${content.slice(0, 70)}`;
+}
+
+function getFakeForwardCardMetadata(peer, segment) {
+    const count = segment.messages.length;
+    return {
+        source: segment.source || (peer.chatType === 2 ? '群聊的聊天记录' : '聊天记录'),
+        summary: segment.summary || `查看${count}条转发消息`,
+        prompt: segment.prompt || '[聊天记录]',
+        news: segment.messages.slice(0, 4).map(message => ({ text: makePreviewText(message) }))
+    };
+}
+
+function createFakeForwardNestedLightApp(peer, segment) {
+    const metadata = getFakeForwardCardMetadata(peer, segment);
+    const content = JSON.stringify({
+        app: 'com.tencent.multimsg',
+        config: {
+            autosize: 1,
+            forward: 1,
+            round: 1,
+            type: 'normal',
+            width: 300
+        },
+        desc: metadata.prompt,
+        extra: JSON.stringify({
+            filename: segment.uuid,
+            tsum: segment.messages.length
+        }),
+        meta: {
+            detail: {
+                news: metadata.news,
+                resid: segment.resId,
+                source: metadata.source,
+                summary: metadata.summary,
+                uniseq: segment.uuid
+            }
+        },
+        prompt: metadata.prompt,
+        ver: '0.0.0.5',
+        view: 'contact'
+    });
+    return Buffer.concat([
+        Buffer.from([0x01]),
+        deflateSync(Buffer.from(content, 'utf8'))
+    ]);
+}
+
+function decodeFakeForwardNestedLightApp(value) {
+    const bytes = Buffer.from(value || []);
+    if (bytes.length < 2 || bytes[0] !== 0x01) {
+        throw new TypeError('嵌套聊天记录卡片无效。');
+    }
+    return JSON.parse(inflateSync(bytes.subarray(1)).toString('utf8'));
 }
 
 function createProtocolMessage(peer, message, index, options = {}) {
@@ -515,6 +634,12 @@ function createProtocolMessage(peer, message, index, options = {}) {
                     businessType: segment.type === 'video'
                         ? (group ? 21 : 11)
                         : (group ? 20 : 10)
+                }
+            });
+        } else if (segment.type === 'forward') {
+            elems.push({
+                lightAppElem: {
+                    data: createFakeForwardNestedLightApp(peer, segment)
                 }
             });
         } else if (group) {
@@ -597,6 +722,38 @@ function createProtocolMessage(peer, message, index, options = {}) {
     };
 }
 
+function appendFakeForwardProtocolItems(peer, messages, fileName, options, items) {
+    const sequenceStart = createSequenceStart(options.sequenceStart);
+    const protocolMessages = messages.map((message, index) => createProtocolMessage(
+        peer,
+        message,
+        index,
+        { ...options, sequenceStart }
+    ));
+    items.push({ fileName, buffer: { msg: protocolMessages } });
+    for (const message of messages) {
+        for (const segment of message.segments) {
+            if (segment.type === 'forward') {
+                const nestedItems = options.nestedProtocolItems?.get?.(segment.uuid);
+                if (Array.isArray(nestedItems) && nestedItems.length) {
+                    items.push(...nestedItems.map((item, index) => ({
+                        fileName: index === 0 ? segment.uuid : item.fileName,
+                        buffer: item.buffer
+                    })));
+                    continue;
+                }
+                appendFakeForwardProtocolItems(
+                    peer,
+                    segment.messages,
+                    segment.uuid,
+                    { ...options, sequenceStart: undefined },
+                    items
+                );
+            }
+        }
+    }
+}
+
 async function buildFakeForwardUploadRequest(payload, options = {}) {
     const peer = normalizePeer(payload?.peer);
     const messages = normalizeFakeForwardMessages(payload?.messages, options);
@@ -604,7 +761,6 @@ async function buildFakeForwardUploadRequest(payload, options = {}) {
     if (peer.chatType === 1 && !selfUid) {
         throw new Error('无法获取当前账号 UID。');
     }
-    const sequenceStart = createSequenceStart(options.sequenceStart);
     const {
         FileExtra,
         GroupFileExtra,
@@ -612,17 +768,16 @@ async function buildFakeForwardUploadRequest(payload, options = {}) {
         MultiMsgTransmit,
         SendLongMsgRequest
     } = await getProtocol();
-    const protocolMessages = messages.map((message, index) => createProtocolMessage(
+    const protocolItems = [];
+    appendFakeForwardProtocolItems(
         peer,
-        message,
-        index,
-        { ...options, selfUid, sequenceStart, FileExtra, GroupFileExtra, MediaMsgInfo }
-    ));
+        messages,
+        'MultiMsg',
+        { ...options, selfUid, FileExtra, GroupFileExtra, MediaMsgInfo },
+        protocolItems
+    );
     const transmit = MultiMsgTransmit.encode({
-        pbItemList: [{
-            fileName: 'MultiMsg',
-            buffer: { msg: protocolMessages }
-        }]
+        pbItemList: protocolItems
     });
     const group = peer.chatType === 2;
     const packet = SendLongMsgRequest.encode({
@@ -637,10 +792,11 @@ async function buildFakeForwardUploadRequest(payload, options = {}) {
     return {
         command: FAKE_FORWARD_UPLOAD_COMMAND,
         packet,
+        protocolItems,
         peer,
         messages,
         count: messages.length,
-        uuid: crypto.randomUUID(),
+        uuid: normalizeFakeForwardUuid(options.uuid || payload?.uuid),
         source: group ? '群聊的聊天记录' : '聊天记录',
         summary: `查看${messages.length}条转发消息`,
         news: messages.slice(0, 4).map(message => ({ text: makePreviewText(message) }))
@@ -966,15 +1122,18 @@ async function parseFakeForwardSendResponse(response) {
 module.exports = {
     FAKE_FORWARD_SEND_COMMAND,
     FAKE_FORWARD_UPLOAD_COMMAND,
+    MAX_FAKE_FORWARD_DEPTH,
     MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE,
     MAX_FAKE_FORWARD_MESSAGES,
     MAX_FAKE_FORWARD_TEXT_LENGTH,
+    MAX_FAKE_FORWARD_TOTAL_MESSAGES,
     buildFakeForwardFileUploadParams,
     buildFakeForwardImageUploadParams,
     buildFakeForwardVideoUploadParams,
     buildFakeForwardSendRequest,
     buildFakeForwardUploadRequest,
     createFakeForwardImageMsgInfo,
+    decodeFakeForwardNestedLightApp,
     createFakeForwardVideoMsgInfo,
     decodeFakeForwardGroupFileElement,
     decodeFakeForwardImageMsgInfo,

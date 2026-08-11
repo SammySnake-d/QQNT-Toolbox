@@ -182,3 +182,16 @@ test('can cancel a native waiter with a reason', async () => {
     assert.equal(pending.cancel(new Error('duplicate cancellation')), false);
     await assert.rejects(pending.promise, /cancelled media task/);
 });
+
+test('describes predicate waiters instead of reporting undefined on timeout', async () => {
+    const browserWindow = new FakeBrowserWindow(17);
+    const predicate = () => false;
+    predicate.description = 'rich-media completion';
+    const pending = nativeIpc.createNativeEventWaiter(browserWindow, predicate, 5);
+
+    await assert.rejects(pending.promise, error => {
+        assert.match(error.message, /rich-media completion/);
+        assert.doesNotMatch(error.message, /undefined/);
+        return true;
+    });
+});

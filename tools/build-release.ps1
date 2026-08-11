@@ -135,6 +135,7 @@ try {
         'QQNT-Toolbox/src/local-sticker-manager.js',
         'QQNT-Toolbox/src/local-sticker-manager.css',
         'QQNT-Toolbox/src/fake-forward.js',
+        'QQNT-Toolbox/src/fake-forward-upload.js',
         'QQNT-Toolbox/src/file-retry.js',
         'QQNT-Toolbox/src/native-ipc.js',
         'QQNT-Toolbox/src/plugin-updater.js',

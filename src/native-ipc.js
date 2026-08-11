@@ -23,6 +23,14 @@ function safeJson(value) {
     }
 }
 
+function describeNativeWaitResponse(value) {
+    if (typeof value === 'function') {
+        return value.description || value.name || 'custom predicate';
+    }
+    const serialized = safeJson(value);
+    return serialized === undefined ? String(value) : serialized;
+}
+
 function isPlainEmptyObject(value) {
     return Boolean(value) &&
         typeof value === 'object' &&
@@ -347,7 +355,7 @@ function createNativeEventWaiter(browserWindow, waitResponse, timeoutMs = 10000)
             waitResponse,
             timer: setTimeout(() => {
                 if (removeWaiter(state, waiter)) {
-                    reject(new Error(`Timed out waiting for native event: ${safeJson(waitResponse)}`));
+                    reject(new Error(`Timed out waiting for native event: ${describeNativeWaitResponse(waitResponse)}`));
                 }
             }, timeoutMs)
         };

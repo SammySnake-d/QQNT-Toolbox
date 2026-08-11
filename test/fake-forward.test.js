@@ -8,8 +8,10 @@ const test = require('node:test');
 const {
     FAKE_FORWARD_SEND_COMMAND,
     FAKE_FORWARD_UPLOAD_COMMAND,
+    MAX_FAKE_FORWARD_DEPTH,
     MAX_FAKE_FORWARD_IMAGES_PER_MESSAGE,
     MAX_FAKE_FORWARD_MESSAGES,
+    MAX_FAKE_FORWARD_TOTAL_MESSAGES,
     buildFakeForwardFileUploadParams,
     buildFakeForwardImageUploadParams,
     buildFakeForwardVideoUploadParams,
@@ -17,6 +19,7 @@ const {
     buildFakeForwardUploadRequest,
     createFakeForwardImageMsgInfo,
     createFakeForwardVideoMsgInfo,
+    decodeFakeForwardNestedLightApp,
     decodeFakeForwardGroupFileElement,
     decodeFakeForwardImageMsgInfo,
     decodeFakeForwardPrivateFileContent,
@@ -61,11 +64,12 @@ function loadFakeForwardEditor() {
     return fakeForwardEditorModule;
 }
 
-test('builds the QQ native image upload parameters without an unsupported transfer id', () => {
+test('builds QQ native image upload parameters with a unique transfer id', () => {
     assert.deepEqual(buildFakeForwardImageUploadParams({
         chatType: 2,
         peerUid: '998877'
-    }, 'D:\\Pictures\\sample.png'), {
+    }, 'D:\\Pictures\\sample.png', 13579), {
+        transferId: 13579,
         filePath: 'D:\\Pictures\\sample.png',
         bizType: 4,
         peerUid: '998877',
@@ -74,19 +78,25 @@ test('builds the QQ native image upload parameters without an unsupported transf
     assert.deepEqual(buildFakeForwardImageUploadParams({
         chatType: 1,
         peerUid: 'u_private_peer'
-    }, 'D:\\Pictures\\sample.png'), {
+    }, 'D:\\Pictures\\sample.png', 24680), {
+        transferId: 24680,
         filePath: 'D:\\Pictures\\sample.png',
         bizType: 3,
         peerUid: 'u_private_peer',
         useNTV2: true
     });
+    assert.throws(() => buildFakeForwardImageUploadParams({
+        chatType: 2,
+        peerUid: '998877'
+    }, 'D:\\Pictures\\sample.png', 0), /transfer ID/);
 });
 
 test('builds native video and file upload parameters for each chat type', () => {
     assert.deepEqual(buildFakeForwardVideoUploadParams({
         chatType: 2,
         peerUid: '998877'
-    }, 'D:\\Videos\\sample.mp4'), {
+    }, 'D:\\Videos\\sample.mp4', 1122), {
+        transferId: 1122,
         filePath: 'D:\\Videos\\sample.mp4',
         bizType: 7,
         peerUid: '998877',
@@ -95,7 +105,8 @@ test('builds native video and file upload parameters for each chat type', () => 
     assert.deepEqual(buildFakeForwardVideoUploadParams({
         chatType: 1,
         peerUid: 'u_private_peer'
-    }, 'D:\\Videos\\sample.mp4'), {
+    }, 'D:\\Videos\\sample.mp4', 3344), {
+        transferId: 3344,
         filePath: 'D:\\Videos\\sample.mp4',
         bizType: 6,
         peerUid: 'u_private_peer',
@@ -130,6 +141,68 @@ test('normalizes fake forward entries without changing multiline text', () => {
         segments: [{ type: 'text', text: 'first line\nsecond line' }],
         timestamp: 1784630000
     });
+});
+
+test('normalizes nested chat records and enforces the depth limit', () => {
+    const nested = normalizeFakeForwardMessages([{
+        senderUin: '12345678',
+        senderName: 'Alice',
+        segments: [{
+            type: 'forward',
+            uuid: 'nested-record-1',
+            resId: 'inner-res-id',
+            messages: [{
+                senderUin: '87654321',
+                senderName: 'Bob',
+                content: 'inside'
+            }]
+        }]
+    }]);
+    assert.equal(nested[0].segments[0].type, 'forward');
+    assert.equal(nested[0].segments[0].messages[0].content, 'inside');
+    const unuploaded = [{
+        senderUin: '12345678',
+        segments: [{
+            type: 'forward',
+            uuid: 'nested-before-upload',
+            messages: [{ senderUin: '87654321', content: 'inside' }]
+        }]
+    }];
+    assert.throws(() => normalizeFakeForwardMessages(unuploaded), /尚未上传/);
+    assert.equal(normalizeFakeForwardMessages(unuploaded, {
+        allowUnuploadedNested: true
+    })[0].segments[0].resId, '');
+
+    let segment = { type: 'text', text: 'bottom' };
+    for (let depth = 0; depth <= MAX_FAKE_FORWARD_DEPTH; depth += 1) {
+        segment = {
+            type: 'forward',
+            uuid: `nested-depth-${depth}`,
+            resId: `res-depth-${depth}`,
+            messages: [{ senderUin: '12345678', segments: [segment] }]
+        };
+    }
+    assert.throws(() => normalizeFakeForwardMessages([{
+        senderUin: '12345678',
+        segments: [segment]
+    }]), /嵌套超过/);
+
+    const oversizedTree = Array.from({ length: MAX_FAKE_FORWARD_MESSAGES }, (_, index) => ({
+        senderUin: '12345678',
+        segments: [{
+            type: 'forward',
+            uuid: `nested-total-${index}`,
+            resId: `nested-total-res-${index}`,
+            messages: Array.from({ length: 3 }, (_, childIndex) => ({
+                senderUin: '87654321',
+                content: `inside-${index}-${childIndex}`
+            }))
+        }]
+    }));
+    assert.throws(
+        () => normalizeFakeForwardMessages(oversizedTree),
+        new RegExp(String(MAX_FAKE_FORWARD_TOTAL_MESSAGES))
+    );
 });
 
 test('reads native contenteditable block lines without joining the first two lines', async () => {
@@ -189,6 +262,200 @@ test('reads a standalone video card without keeping the contenteditable placehol
         size: 1024,
         pending: false
     }]);
+});
+
+test('reads a standalone nested chat record token from its serialized fallback', async () => {
+    const editor = await loadFakeForwardEditor();
+    const forward = {
+        uuid: 'nested-record-1',
+        source: '群聊的聊天记录',
+        summary: '查看1条转发消息',
+        prompt: '[聊天记录]',
+        messages: [{
+            id: 'inner-message-1',
+            senderUin: '87654321',
+            senderName: 'Bob',
+            segments: [{ type: 'text', text: 'inside' }],
+            timestamp: 1784630000000
+        }]
+    };
+    const root = composerElement('DIV', [
+        composerElement('SPAN', [], {
+            classNames: ['qff-composer-forward'],
+            dataset: { forward: JSON.stringify(forward) }
+        }),
+        composerElement('DIV', [composerElement('BR')])
+    ]);
+
+    const segments = editor.readFakeForwardComposerSegments(root);
+    assert.equal(segments.length, 1);
+    assert.equal(segments[0].type, 'forward');
+    assert.equal(segments[0].uuid, 'nested-record-1');
+    assert.equal(segments[0].source, '群聊的聊天记录');
+    assert.equal(segments[0].summary, '查看1条转发消息');
+    assert.equal(segments[0].prompt, '[聊天记录]');
+    assert.deepEqual(segments[0].messages, [{
+        id: 'inner-message-1',
+        senderUin: '87654321',
+        senderName: 'Bob',
+        segments: [{ type: 'text', text: 'inside' }],
+        timestamp: 1784630000000
+    }]);
+
+    const restoredRoot = composerElement('DIV', [
+        composerElement('SPAN', [], {
+            classNames: ['qff-composer-forward'],
+            dataset: { forwardId: 'forward-state-1' }
+        })
+    ]);
+    assert.equal(editor.readFakeForwardComposerSegments(restoredRoot, {
+        resolveForward: id => id === 'forward-state-1' ? forward : null
+    })[0].uuid, 'nested-record-1');
+});
+
+test('projects an edited nested scope into the root message tree', async () => {
+    const editor = await loadFakeForwardEditor();
+    const oldForward = {
+        type: 'forward',
+        uuid: 'nested-record-1',
+        messages: [{ id: 'old', segments: [{ type: 'text', text: 'old' }] }]
+    };
+    const rootMessages = [{
+        id: 'outer-message',
+        senderUin: '12345678',
+        senderName: 'Alice',
+        segments: [oldForward],
+        timestamp: 1784630000000
+    }];
+    const currentMessages = [
+        { id: 'new-1', segments: [{ type: 'text', text: 'new one' }] },
+        { id: 'new-2', segments: [{ type: 'text', text: 'new two' }] }
+    ];
+    const projected = editor.projectFakeForwardDraftMessages(currentMessages, [{
+        parentMessages: rootMessages,
+        form: {
+            selectedId: 'outer-message',
+            senderUin: '12345678',
+            senderName: 'Alice',
+            timestampDate: '2026-08-11',
+            timestampTime: '20:00',
+            segments: [oldForward]
+        },
+        segment: { type: 'forward', uuid: 'nested-record-1' },
+        editing: true
+    }]);
+
+    assert.equal(projected.length, 1);
+    assert.deepEqual(projected[0].segments[0].messages, currentMessages);
+    assert.equal(editor.countFakeForwardDraftMessages(projected), 3);
+    assert.deepEqual(rootMessages[0].segments[0].messages, oldForward.messages);
+
+    const textMessage = id => ({ id, segments: [{ type: 'text', text: id }] });
+    const levelTwo = Array.from({ length: 100 }, (_, index) => textMessage(`l2-${index}`));
+    const levelOne = Array.from({ length: 100 }, (_, index) => textMessage(`l1-${index}`));
+    levelOne[0] = {
+        id: 'l1-forward',
+        segments: [{ type: 'forward', uuid: 'level-two', messages: levelTwo }]
+    };
+    const boundedRoot = [
+        ...Array.from({ length: 99 }, (_, index) => textMessage(`root-${index}`)),
+        rootMessages[0]
+    ];
+    const frame = [{
+        parentMessages: boundedRoot,
+        form: {
+            selectedId: 'outer-message',
+            segments: [oldForward]
+        },
+        segment: { type: 'forward', uuid: 'nested-record-1' },
+        editing: true
+    }];
+    assert.equal(editor.countFakeForwardDraftMessages(
+        editor.projectFakeForwardDraftMessages(levelOne, frame)
+    ), 300);
+    levelTwo[0] = {
+        id: 'l2-forward',
+        segments: [{
+            type: 'forward',
+            uuid: 'level-three',
+            messages: [textMessage('l3-0')]
+        }]
+    };
+    assert.equal(editor.countFakeForwardDraftMessages(
+        editor.projectFakeForwardDraftMessages(levelOne, frame)
+    ), 301);
+});
+
+test('deduplicates nested editor drafts while preserving cancellation baselines', async () => {
+    const editor = await loadFakeForwardEditor();
+    const originalChild = [{
+        id: 'child-1',
+        senderUin: '20002',
+        senderName: 'Bob',
+        segments: [{ type: 'text', text: 'before' }],
+        timestamp: 1784630001000
+    }];
+    const originalForward = {
+        type: 'forward',
+        uuid: 'forward-1',
+        messages: originalChild,
+        source: '',
+        summary: '',
+        prompt: '[聊天记录]'
+    };
+    const rootMessages = [{
+        id: 'root-1',
+        senderUin: '10001',
+        senderName: 'Alice',
+        segments: [originalForward],
+        timestamp: 1784630000000
+    }];
+    const level = {
+        parentMessages: structuredClone(rootMessages),
+        form: {
+            selectedId: 'root-1',
+            senderUin: '10001',
+            senderName: 'Alice',
+            timestampDate: '2026-07-21',
+            timestampTime: '12:00',
+            segments: [structuredClone(originalForward)]
+        },
+        segment: {
+            type: 'forward',
+            uuid: 'forward-1',
+            source: '',
+            summary: '',
+            prompt: '[聊天记录]'
+        },
+        editing: true,
+        returnUuid: 'forward-1'
+    };
+    const currentMessages = structuredClone(originalChild);
+    currentMessages[0].segments[0].text = 'after';
+    const snapshot = {
+        rootMessages,
+        levels: [level],
+        currentMessages,
+        currentForm: {
+            selectedId: '',
+            senderUin: '',
+            senderName: '',
+            timestampDate: '2026-07-21',
+            timestampTime: '12:01',
+            segments: []
+        }
+    };
+
+    const graph = editor.encodeFakeForwardDraftGraph(snapshot);
+    const decoded = editor.decodeFakeForwardDraftGraph(graph);
+    assert.equal(graph.format, 'deduplicated-graph');
+    assert.equal(graph.rootMessagesRef, graph.levels[0].parentMessagesRef);
+    assert.deepEqual(decoded, snapshot);
+    decoded.currentMessages[0].segments[0].text = 'changed again';
+    assert.equal(
+        decoded.levels[0].form.segments[0].messages[0].segments[0].text,
+        'before'
+    );
 });
 
 test('rejects invalid senders, empty content, unsupported peers, and oversized lists', async () => {
@@ -260,6 +527,143 @@ test('encodes fake text nodes into QQ long-message upload protobuf', async () =>
     assert.equal(record.contentHead.forward.field3, 1);
     assert.match(record.contentHead.forward.avatar, /dst_uin=12345678/);
     assert.equal(record.body.richText.elems[0].text.str, 'hello');
+});
+
+test('encodes nested chat records as native light-app cards and bundled MultiMsg items', async () => {
+    const built = await buildFakeForwardUploadRequest({
+        peer: { chatType: 2, peerUid: '998877', guildId: '' },
+        messages: [{
+            senderUin: '12345678',
+            senderName: 'Alice',
+            segments: [{
+                type: 'forward',
+                uuid: 'nested-record-1',
+                resId: 'inner-res-id',
+                messages: [{
+                    senderUin: '87654321',
+                    senderName: 'Bob',
+                    content: 'inside',
+                    timestamp: 1784630000000
+                }]
+            }],
+            timestamp: 1784630000000
+        }]
+    }, { sequenceStart: 6000, uuid: 'outer-record-1' });
+    const decoded = await decodeFakeForwardUploadRequest(built.packet);
+    assert.deepEqual(
+        decoded.transmit.pbItemList.map(item => item.fileName),
+        ['MultiMsg', 'nested-record-1']
+    );
+    const outerRecord = decoded.transmit.pbItemList[0].buffer.msg[0];
+    const card = decodeFakeForwardNestedLightApp(
+        outerRecord.body.richText.elems[0].lightAppElem.data
+    );
+    assert.equal(card.app, 'com.tencent.multimsg');
+    assert.equal(card.meta.detail.resid, 'inner-res-id');
+    assert.equal(card.meta.detail.uniseq, 'nested-record-1');
+    assert.deepEqual(JSON.parse(card.extra), {
+        filename: 'nested-record-1',
+        tsum: 1
+    });
+    assert.equal(card.meta.detail.news[0].text, 'Bob: inside');
+    assert.equal(
+        decoded.transmit.pbItemList[1].buffer.msg[0].body.richText.elems[0].text.str,
+        'inside'
+    );
+    assert.equal(built.uuid, 'outer-record-1');
+    assert.equal(built.news[0].text, 'Alice: [聊天记录]');
+});
+
+test('encodes multiple sibling nested records in one merged forward', async () => {
+    const nestedMessage = (senderUin, senderName, content) => ({
+        senderUin,
+        senderName,
+        content,
+        timestamp: 1784630000000
+    });
+    const built = await buildFakeForwardUploadRequest({
+        peer: { chatType: 2, peerUid: '998877', guildId: '' },
+        messages: [
+            {
+                senderUin: '12345678',
+                senderName: 'Alice',
+                segments: [{
+                    type: 'forward',
+                    uuid: 'sibling-record-1',
+                    resId: 'sibling-res-1',
+                    messages: [nestedMessage('20001', 'Bob', 'first child')]
+                }]
+            },
+            {
+                senderUin: '87654321',
+                senderName: 'Carol',
+                segments: [{
+                    type: 'forward',
+                    uuid: 'sibling-record-2',
+                    resId: 'sibling-res-2',
+                    messages: [nestedMessage('20002', 'Dave', 'second child')]
+                }]
+            }
+        ]
+    }, { sequenceStart: 6500, uuid: 'outer-sibling-records' });
+    const decoded = await decodeFakeForwardUploadRequest(built.packet);
+    assert.deepEqual(
+        decoded.transmit.pbItemList.map(item => item.fileName),
+        ['MultiMsg', 'sibling-record-1', 'sibling-record-2']
+    );
+    const rootMessages = decoded.transmit.pbItemList[0].buffer.msg;
+    const cards = rootMessages.map(message =>
+        decodeFakeForwardNestedLightApp(message.body.richText.elems[0].lightAppElem.data)
+    );
+    assert.deepEqual(cards.map(card => card.meta.detail.resid), [
+        'sibling-res-1',
+        'sibling-res-2'
+    ]);
+    assert.deepEqual(cards.map(card => card.meta.detail.uniseq), [
+        'sibling-record-1',
+        'sibling-record-2'
+    ]);
+});
+
+test('reuses the uploaded child record bytes inside its parent resource table', async () => {
+    const peer = { chatType: 2, peerUid: '998877', guildId: '' };
+    const childMessages = [{
+        senderUin: '87654321',
+        senderName: 'Bob',
+        content: 'inside',
+        timestamp: 1784630000000
+    }];
+    const child = await buildFakeForwardUploadRequest({
+        peer,
+        messages: childMessages,
+        uuid: 'nested-record-raw'
+    }, { sequenceStart: 7000 });
+    const parent = await buildFakeForwardUploadRequest({
+        peer,
+        messages: [{
+            senderUin: '12345678',
+            senderName: 'Alice',
+            segments: [{
+                type: 'forward',
+                uuid: child.uuid,
+                resId: 'inner-res-id',
+                messages: childMessages
+            }],
+            timestamp: 1784630001000
+        }]
+    }, {
+        sequenceStart: 9000,
+        nestedProtocolItems: new Map([[child.uuid, child.protocolItems]])
+    });
+    const [decodedChild, decodedParent] = await Promise.all([
+        decodeFakeForwardUploadRequest(child.packet),
+        decodeFakeForwardUploadRequest(parent.packet)
+    ]);
+    const childRoot = decodedChild.transmit.pbItemList[0];
+    const nestedItem = decodedParent.transmit.pbItemList[1];
+    assert.equal(nestedItem.fileName, child.uuid);
+    assert.deepEqual(nestedItem.buffer.msg, childRoot.buffer.msg);
+    assert.equal(nestedItem.buffer.msg[0].contentHead.sequence, 7000);
 });
 
 test('encodes image-only and text-plus-image nodes as native service-48 elements', async () => {
@@ -509,7 +913,7 @@ test('wires the editor through local IPC without the retired third-party builder
 
     assert.match(mainSource, /sendFakeForwardFromRenderer/);
     assert.match(mainSource, /getRichMediaService\?\.\(\)/);
-    assert.match(mainSource, /createFakeForwardImageUploadWaiters/);
+    assert.match(mainSource, /waitForCompletedFakeForwardUpload/);
     assert.match(mainSource, /onlyUploadFile\(request\.peer, request\.files\)/);
     assert.match(mainSource, /uploadFakeForwardVideo/);
     assert.match(mainSource, /prepareFakeForwardMedia/);
@@ -525,9 +929,9 @@ test('wires the editor through local IPC without the retired third-party builder
     assert.match(rendererSource, /createFakeForwardEditor/);
     assert.match(editorSource, /qqnt-toolbox-fake-forward-draft/);
     assert.match(editorSource, /normalizeDraftSegments/);
-    assert.match(editorSource, /createButton\('qff-list-action', '上移'\)/);
-    assert.match(editorSource, /createButton\('qff-list-action', '下移'\)/);
-    assert.match(editorSource, /createButton\('qff-list-action qff-list-delete', '删除'\)/);
+    assert.match(editorSource, /createButton\('qff-list-action', '↑', '上移'\)/);
+    assert.match(editorSource, /createButton\('qff-list-action', '↓', '下移'\)/);
+    assert.match(editorSource, /createButton\('qff-list-action qff-list-delete', '×', '删除'\)/);
     assert.doesNotMatch(editorSource, /qff-message-drag/);
     assert.match(editorSource, /let senderName = state\.fields\.senderName\.value\.trim\(\);/);
     assert.match(editorSource, /await options\.resolveSenderName\?\.\(senderUin\)/);
@@ -536,7 +940,7 @@ test('wires the editor through local IPC without the retired third-party builder
     assert.match(editorSource, /addEventListener\(['"]paste['"]/);
     assert.match(editorSource, /addEventListener\(['"]drop['"]/);
     assert.match(editorSource, /VIDEO_FILE_PATTERN/);
-    assert.match(editorSource, /视频或文件必须单独作为一条消息/);
+    assert.match(editorSource, /视频、文件或嵌套聊天记录必须单独作为一条消息/);
     assert.match(editorSource, /createNativeChatToolbarEntry\(toolbar/);
     assert.match(editorSource, /renderIcon:\s*applyEntryGlyph/);
     assert.match(editorSource, /bindNativeChatToolbarAction\(entry, open\)/);
@@ -561,4 +965,64 @@ test('wires the editor through local IPC without the retired third-party builder
     assert.doesNotMatch(editorStyle, /tooltip_background|tooltip_text/);
     assert.match(editorSource, /state\.status\.title\s*=\s*message/);
     assert.doesNotMatch(mainSource + rendererSource + editorSource, /api\..*\/api\/wzlt|multiForwardMsg\(built\.records/);
+});
+
+test('wires recursive nested-record editing, draft storage, and bottom-up uploads', () => {
+    const root = path.join(__dirname, '..');
+    const mainSource = fs.readFileSync(path.join(root, 'src', 'main.js'), 'utf8');
+    const editorSource = fs.readFileSync(path.join(root, 'src', 'fake-forward-editor.js'), 'utf8');
+    const editorStyle = fs.readFileSync(path.join(root, 'src', 'fake-forward-editor.css'), 'utf8');
+
+    assert.match(editorSource, /const MAX_NESTED_DEPTH\s*=\s*3/);
+    assert.match(editorSource, /const MAX_TOTAL_MESSAGES\s*=\s*300/);
+    assert.match(editorSource, /const FORWARD_TOKEN_CLASS\s*=\s*['"]qff-composer-forward['"]/);
+    assert.match(editorSource, /scopeStack:\s*\[\]/);
+    assert.match(editorSource, /function normalizeDraftMessages\(/);
+    assert.match(editorSource, /state\.rootMessages\s*=\s*normalizeDraftMessages\(messages,\s*0,\s*budget\)/);
+    assert.match(editorSource, /version:\s*3/);
+    assert.match(editorSource, /format:\s*['"]deduplicated-graph['"]/);
+    assert.match(editorSource, /function encodeFakeForwardDraftGraph\(/);
+    assert.match(editorSource, /function decodeFakeForwardDraftGraph\(/);
+    assert.match(editorSource, /function restoreCompactDraftSession\(/);
+    assert.match(editorSource, /function restoreDraftSession\(/);
+    assert.match(editorSource, /JSON\.stringify\(stored\)/);
+    assert.match(editorSource, /草稿过大，未能自动保存/);
+    assert.match(editorSource, /if \(!saveDraft\(\) && !force\)/);
+    assert.match(editorSource, /forwardSegments:\s*new Map\(\)/);
+    assert.match(editorSource, /MAX_FORWARD_SEGMENT_CACHE\s*=\s*8/);
+    assert.match(editorSource, /resolveForward:\s*id\s*=>\s*state\.forwardSegments\.get\(id\)/);
+    assert.match(editorSource, /function projectFakeForwardDraftMessages\(/);
+    assert.match(editorSource, /createButton\([\s\S]{0,160}['"]添加子合并['"]/);
+    assert.match(editorSource, /function enterNestedRecord\(/);
+    assert.match(editorSource, /function finishNestedRecord\(/);
+    assert.match(editorSource, /function cancelNestedRecord\(/);
+    assert.match(editorSource, /function findIncompleteDraftPath\(/);
+    assert.match(editorSource, /function focusDraftPath\(/);
+    assert.match(editorSource, /state\.fields\.editorGuide/);
+    assert.match(editorSource, /子合并 · \$\{forward\.messages\.length\} 条消息/);
+    assert.match(editorSource, /待填写显示信息/);
+    assert.doesNotMatch(editorSource, /qff-back/);
+    assert.match(editorSource, /const emptyNestedScope\s*=\s*state\.scopeStack\.length\s*>\s*0\s*&&\s*state\.messages\.length\s*===\s*0/);
+    assert.match(editorSource, /if \(!existing && depth > 0 && !state\.messages\.length\)/);
+    assert.match(editorSource, /请先在当前子合并中添加至少一条消息/);
+    assert.match(editorSource, /正在编辑子合并；添加完消息后点击“完成此子合并”/);
+    assert.match(editorSource, /已添加子合并草稿；可继续添加，或在左侧补充显示信息/);
+    assert.match(editorSource, /hasForward \? '添加到当前层' : '添加消息'/);
+    assert.match(editorSource, /async function commitForm\(/);
+    assert.match(editorSource, /已添加子合并；可继续添加另一个子合并/);
+    assert.match(editorSource, /if \(state\.scopeStack\.length\) \{\s*cancelNestedRecord\(\);\s*\} else \{\s*close\(\);/);
+    assert.match(editorSource, /if \(hasPendingForm\(\)\) \{\s*setStatus\('请先添加或保存当前消息'/);
+    assert.match(editorStyle, /@media \(max-width:\s*460px\)/);
+    assert.match(editorStyle, /\.qff-list-footer\s*\{/);
+    assert.match(editorStyle, /\.qff-forward-avatar\s*\{/);
+    assert.match(editorStyle, /\.qff-editor-summary\s*\{/);
+    assert.match(editorStyle, /\.qff-composer-toolbar\s*\{[\s\S]*?flex-direction:\s*column/);
+    assert.match(editorStyle, /\.qff-form-actions \.qff-button\[hidden\] \+ \.qff-button\s*\{[\s\S]*?grid-column:\s*1 \/ -1/);
+
+    assert.match(mainSource, /async function uploadFakeForwardRecordTree\(/);
+    assert.match(mainSource, /normalizeFakeForwardMessages\(preparedPayload\.messages,\s*\{\s*allowUnuploadedNested:\s*true/);
+    assert.match(mainSource, /await uploadFakeForwardRecordTree\(browserWindow,\s*\{\s*peer:\s*payload\.peer,\s*messages:\s*segment\.messages,\s*uuid:\s*segment\.uuid\s*\}/);
+    assert.match(mainSource, /segment\.uuid\s*=\s*nested\.upload\.uuid/);
+    assert.match(mainSource, /segment\.resId\s*=\s*nested\.resId/);
+    assert.match(mainSource, /const \{ upload, resId \}\s*=\s*await uploadFakeForwardRecordTree\(/);
 });

@@ -36,8 +36,8 @@
 .qff-dialog {
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
-    width: min(780px, calc(100vw - 32px));
-    max-height: min(640px, calc(100vh - 48px));
+    width: min(860px, calc(100vw - 32px));
+    max-height: min(660px, calc(100vh - 48px));
     overflow: hidden;
     border: 1px solid var(--qff-border);
     border-radius: 8px;
@@ -59,10 +59,30 @@
     border-bottom: 1px solid var(--qff-border);
 }
 
+.qff-title-group {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    gap: 8px;
+}
+
 .qff-title {
+    min-width: 0;
     margin: 0;
+    overflow: hidden;
     font-size: 16px;
     font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.qff-layer-path {
+    flex: none;
+    padding-left: 9px;
+    border-left: 1px solid var(--qff-border);
+    color: var(--qff-muted);
+    font-size: 12px;
+    white-space: nowrap;
 }
 
 .qff-close {
@@ -93,14 +113,15 @@
 .qff-close:focus-visible,
 .qff-list-action:focus-visible,
 .qff-button:focus-visible,
-.qff-message:focus-visible {
+.qff-message:focus-visible,
+.qff-composer-forward-open:focus-visible {
     outline: 2px solid var(--qff-accent);
     outline-offset: 1px;
 }
 
 .qff-body {
     display: grid;
-    grid-template-columns: minmax(240px, 0.75fr) minmax(400px, 1.25fr);
+    grid-template-columns: minmax(260px, 0.8fr) minmax(410px, 1.2fr);
     min-height: 0;
 }
 
@@ -109,11 +130,11 @@
     display: grid;
     min-width: 0;
     min-height: 0;
-    padding: 14px 16px 16px;
+    padding: 14px 16px;
 }
 
 .qff-list-pane {
-    grid-template-rows: auto minmax(160px, 1fr);
+    grid-template-rows: auto minmax(160px, 1fr) auto;
     overflow: hidden;
     border-right: 1px solid var(--qff-border);
     background: var(--qff-pane);
@@ -121,8 +142,7 @@
 }
 
 .qff-form {
-    padding-right: 18px;
-    padding-left: 18px;
+    padding: 16px 20px 18px;
 }
 
 .qff-list-header,
@@ -194,6 +214,25 @@
     background: var(--qff-hover);
 }
 
+.qff-message[data-kind="forward"] {
+    border-color: color-mix(in srgb, var(--qff-accent) 24%, transparent);
+    background: color-mix(in srgb, var(--qff-accent-soft) 54%, transparent);
+}
+
+.qff-message[data-kind="forward"]:hover {
+    background: color-mix(in srgb, var(--qff-accent) 12%, var(--qff-bg));
+}
+
+.qff-message[data-kind="forward"] .qff-message-text {
+    color: var(--qff-accent);
+    font-weight: 600;
+}
+
+.qff-message[data-incomplete="true"] .qff-message-name {
+    color: var(--qff-muted);
+    font-weight: 500;
+}
+
 .qff-message[aria-selected="true"] {
     border-color: transparent;
     background: var(--qff-accent-soft);
@@ -206,6 +245,36 @@
     border-radius: 50%;
     object-fit: cover;
     background: var(--qff-layer);
+}
+
+.qff-forward-avatar {
+    position: relative;
+    display: block;
+    width: 34px;
+    height: 34px;
+    overflow: hidden;
+    border-radius: 6px;
+    color: var(--qff-accent);
+    background: var(--qff-accent-soft);
+}
+
+.qff-forward-avatar > span {
+    position: absolute;
+    width: 17px;
+    height: 12px;
+    border: 1.5px solid currentColor;
+    border-radius: 3px;
+}
+
+.qff-forward-avatar > span:first-child {
+    top: 7px;
+    left: 6px;
+}
+
+.qff-forward-avatar > span:last-child {
+    right: 5px;
+    bottom: 6px;
+    background: color-mix(in srgb, var(--qff-accent-soft) 74%, var(--qff-control));
 }
 
 .qff-message-main,
@@ -250,19 +319,21 @@
     display: flex;
     align-items: center;
     flex: none;
-    gap: 2px;
-    margin-left: 10px;
+    gap: 3px;
+    margin-left: 8px;
 }
 
 .qff-list-action {
-    min-width: 0;
+    display: inline-grid;
+    place-items: center;
+    width: 28px;
     height: 28px;
-    padding: 0 8px;
+    padding: 0;
     border: 1px solid transparent;
     border-radius: 5px;
     color: var(--qff-muted);
     background: transparent;
-    font: 12px/1 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    font: 17px/1 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
     cursor: pointer;
 }
 
@@ -284,10 +355,52 @@
     cursor: default;
 }
 
+.qff-list-footer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    padding-top: 12px;
+    border-top: 1px solid var(--qff-border);
+}
+
+.qff-list-footer .qff-button {
+    width: 100%;
+    min-width: 0;
+    padding-right: 8px;
+    padding-left: 8px;
+}
+
 .qff-form {
     align-content: start;
-    gap: 10px;
+    gap: 12px;
     overflow: auto;
+}
+
+.qff-editor-summary {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--qff-border);
+}
+
+.qff-editor-mode {
+    overflow: hidden;
+    font-size: 14px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.qff-editor-guide {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--qff-muted);
+    font-size: 12px;
+    line-height: 18px;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
 }
 
 .qff-field,
@@ -354,9 +467,9 @@
 }
 
 .qff-composer {
-    height: 210px;
-    min-height: 210px;
-    max-height: 210px;
+    height: 194px;
+    min-height: 194px;
+    max-height: 194px;
     padding: 10px 11px;
     border: 0;
     background: transparent !important;
@@ -372,8 +485,14 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    min-height: 32px;
-    padding-top: 1px;
+    min-height: 34px;
+    padding-top: 2px;
+}
+
+.qff-composer-insert-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .qff-composer-image {
@@ -422,6 +541,107 @@
 
 .qff-composer-attachment[data-pending="true"] {
     opacity: 0.62;
+}
+
+.qff-composer-forward {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 28px;
+    align-items: center;
+    gap: 3px;
+    width: min(100%, 390px);
+    min-height: 68px;
+    margin: 3px 0;
+    padding: 4px 6px 4px 4px;
+    border: 1px solid var(--qff-border);
+    border-radius: 6px;
+    background: var(--qff-layer);
+    vertical-align: middle;
+    cursor: pointer;
+    user-select: none;
+}
+
+.qff-composer-forward:hover,
+.qff-composer-forward:focus-within {
+    background: var(--qff-hover);
+}
+
+.qff-composer-forward-open {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+    min-height: 58px;
+    padding: 5px 4px 5px 6px;
+    border: 0;
+    border-radius: 5px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.qff-composer-forward-icon {
+    position: relative;
+    display: block;
+    width: 40px;
+    height: 40px;
+    border-radius: 5px;
+    color: var(--qff-accent);
+    background: var(--qff-accent-soft);
+}
+
+.qff-composer-forward-icon > span {
+    position: absolute;
+    width: 19px;
+    height: 14px;
+    border: 1.5px solid currentColor;
+    border-radius: 4px;
+}
+
+.qff-composer-forward-icon > span:first-child {
+    top: 9px;
+    left: 8px;
+}
+
+.qff-composer-forward-icon > span:last-child {
+    right: 8px;
+    bottom: 8px;
+    background: color-mix(in srgb, var(--qff-accent-soft) 70%, var(--qff-control));
+}
+
+.qff-composer-forward-details,
+.qff-composer-forward-name,
+.qff-composer-forward-meta {
+    display: block;
+    min-width: 0;
+}
+
+.qff-composer-forward-name {
+    font-weight: 600;
+}
+
+.qff-composer-forward-meta {
+    display: -webkit-box;
+    margin-top: 3px;
+    overflow: hidden;
+    color: var(--qff-muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+
+.qff-composer-forward-edit {
+    color: var(--qff-muted);
+    font-size: 12px;
+}
+
+.qff-composer-forward:hover .qff-composer-forward-edit {
+    color: var(--qff-accent);
 }
 
 .qff-composer-attachment-icon {
@@ -503,6 +723,20 @@
     opacity: 1;
 }
 
+.qff-composer-forward .qff-composer-forward-remove {
+    position: static;
+    width: 26px;
+    height: 26px;
+    color: var(--qff-muted);
+    background: transparent;
+    opacity: 1;
+}
+
+.qff-composer-forward .qff-composer-forward-remove:hover {
+    color: var(--qff-text);
+    background: var(--qff-layer);
+}
+
 .qff-composer-attachment .qff-composer-attachment-remove:hover {
     color: var(--qff-text);
     background: var(--qff-hover);
@@ -554,7 +788,18 @@
 }
 
 .qff-button.qff-file-button {
-    min-width: 76px;
+    min-width: 74px;
+}
+
+.qff-button.qff-nested-button:not(:disabled) {
+    border-color: color-mix(in srgb, var(--qff-accent) 32%, var(--qff-border));
+    color: var(--qff-accent);
+    -webkit-text-fill-color: var(--qff-accent);
+    background: var(--qff-accent-soft);
+}
+
+.qff-button.qff-nested-button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--qff-accent) 18%, var(--qff-bg));
 }
 
 .qff-button:disabled {
@@ -589,13 +834,13 @@
 
 @media (max-height: 620px) {
     .qff-composer {
-        height: 182px;
-        min-height: 182px;
-        max-height: 182px;
+        height: 166px;
+        min-height: 166px;
+        max-height: 166px;
     }
 }
 
-@media (max-width: 700px) {
+@media (max-width: 720px) {
     #qqnt-toolbox-fake-forward-editor {
         padding: 12px;
     }
@@ -618,5 +863,52 @@
 
     .qff-form {
         overflow: visible;
+    }
+}
+
+@media (max-width: 460px) {
+    .qff-header,
+    .qff-footer {
+        padding-right: 12px;
+        padding-left: 12px;
+    }
+
+    .qff-layer-path {
+        max-width: 38vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .qff-field-row,
+    .qff-time-row {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .qff-composer-toolbar {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    .qff-composer-insert-actions,
+    .qff-form-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .qff-composer-insert-actions {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .qff-composer-insert-actions .qff-button,
+    .qff-form-actions .qff-button {
+        width: 100%;
+        min-width: 0;
+        padding-right: 8px;
+        padding-left: 8px;
+    }
+
+    .qff-form-actions .qff-button[hidden] + .qff-button {
+        grid-column: 1 / -1;
     }
 }
