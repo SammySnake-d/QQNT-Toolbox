@@ -44,6 +44,9 @@ function sanitizePttInfo(value) {
         fileUuid: normalizeText(pttElement.fileUuid),
         fileSubId: normalizeText(pttElement.fileSubId),
         fileId: normalizeText(pttElement.fileId),
+        ...(Number(pttElement.fileSize) > 0
+            ? { fileSize: Math.trunc(Number(pttElement.fileSize)) }
+            : {}),
         ...(waveAmplitudes.length ? { waveAmplitudes } : {})
     };
     return ptt.filePath || ptt.sourcePath || ptt.fileName || ptt.md5HexStr ||

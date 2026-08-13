@@ -426,7 +426,7 @@ test('conceals stale media until the reopened viewer has rendered its requested 
     assert.doesNotMatch(viewerSource, /renderSelected\(false, nextState\.playback\)\.then/);
 });
 
-test('keeps hidden viewer controls hidden while stationary navigation changes media', () => {
+test('keeps video viewer controls hidden while stationary navigation changes media', () => {
     const viewerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.js'), 'utf8');
     const navigateSource = viewerSource.slice(
         viewerSource.indexOf('function navigateTo'),
@@ -444,6 +444,14 @@ test('keeps hidden viewer controls hidden while stationary navigation changes me
         viewerSource.indexOf('function hideControls'),
         viewerSource.indexOf('function scheduleControlsHide')
     );
+    const scheduleControlsHideSource = viewerSource.slice(
+        viewerSource.indexOf('function scheduleControlsHide'),
+        viewerSource.indexOf('function showControls')
+    );
+    const setFullscreenSource = viewerSource.slice(
+        viewerSource.indexOf('function setVideoFullscreen'),
+        viewerSource.indexOf('function updatePlayerControls')
+    );
     const renderSelectedSource = viewerSource.slice(
         viewerSource.indexOf('async function renderSelected'),
         viewerSource.indexOf('function scheduleAdjacentPreload')
@@ -458,22 +466,54 @@ test('keeps hidden viewer controls hidden while stationary navigation changes me
     );
 
     assert.match(viewerSource, /const CONTROL_POINTER_MOVE_THRESHOLD = 5/);
+    assert.match(viewerSource, /function canAutoHideControls\(\) \{\s*return activeMedia\?\.tagName === 'VIDEO';/);
     assert.match(viewerSource, /function refreshVisibleControls\(\) \{\s*if \(!controlsHidden\) \{\s*showControls\(\);/);
     assert.match(navigateSource, /renderSelected\(\)\.catch\(\(\) => \{\}\);\s*refreshVisibleControls\(\);/);
     assert.doesNotMatch(navigateSource, /\bshowControls\(/);
     assert.match(applyStateSource, /const previousGalleryId = state\.galleryId[\s\S]*const galleryChanged = nextState\.galleryId !== previousGalleryId/);
     assert.match(applyStateSource, /if \(freshPresentation \|\| galleryChanged\) \{\s*showControls\(\);\s*\}/);
     assert.doesNotMatch(applyStateSource, /renderSelected\(false, nextState\.playback\)\.catch\(\(\) => \{\}\);\s*showControls\(\)/);
+    assert.match(setFullscreenSource, /const next = Boolean\(enabled\) && activeMedia\?\.tagName === 'VIDEO';[\s\S]*showControls\(next\);/);
+    assert.match(hideControlsSource, /if \(!canAutoHideControls\(\)\) \{\s*showControls\(false\);\s*return;/);
     assert.match(hideControlsSource, /if \(controlsHidden \|\|[\s\S]*return;\s*\}[\s\S]*controlsPointerAnchor = latestPointer \? \{ \.\.\.latestPointer \} : null;[\s\S]*controlsHidden = true/);
+    assert.doesNotMatch(hideControlsSource, /activeMedia\?\.tagName === 'VIDEO' && activeMedia\.paused/);
+    assert.match(scheduleControlsHideSource, /clearTimeout\(controlsTimer\);\s*if \(!canAutoHideControls\(\)\) \{\s*showControls\(false\);\s*return;\s*\}\s*controlsTimer = window\.setTimeout\(hideControls, CONTROL_HIDE_DELAY_MS\);/);
     assert.match(pointerMoveSource, /latestPointer = point;\s*if \(!controlsPointerAnchor\) \{\s*controlsPointerAnchor = point;\s*return;/);
     assert.match(pointerMoveSource, /Math\.abs\(point\.x - controlsPointerAnchor\.x\) \+[\s\S]*Math\.abs\(point\.y - controlsPointerAnchor\.y\)[\s\S]*pointerDelta >= CONTROL_POINTER_MOVE_THRESHOLD/);
     assert.match(renderSelectedSource, /pauseWithoutShowingControls\(activeMedia\)/);
     assert.doesNotMatch(renderSelectedSource, /activeMedia\?\.pause\?\.\(\)/);
     assert.match(bindVideoSource, /on\('pause',[\s\S]*silentVideoPauses\.delete\(video\)[\s\S]*if \(!silent\) \{\s*showControls\(false\);/);
+    assert.match(bindVideoSource, /video\.volume = savedVolume;\s*video\.muted = savedMuted \|\| savedVolume === 0;\s*video\.playbackRate = savedPlaybackRate;/);
     assert.match(bindVideoSource, /activeVideoCleanup = \(\) => \{\s*for \(const \[name, listener\] of listeners\)[\s\S]*video\.removeEventListener\(name, listener\);[\s\S]*video\.pause\(\)/);
     assert.match(keydownSource, /let navigationKey = false[\s\S]*event\.key === 'ArrowLeft'[\s\S]*navigationKey = true[\s\S]*event\.key === 'ArrowRight'[\s\S]*navigationKey = true/);
     assert.match(keydownSource, /event\.key === 'Home'[\s\S]*navigationKey = true[\s\S]*event\.key === 'End'[\s\S]*navigationKey = true/);
     assert.match(keydownSource, /if \(!navigationKey\) \{\s*showControls\(\);\s*\}/);
+});
+
+test('persists video volume and mute independently while preserving explicit playback snapshots', () => {
+    const viewerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.js'), 'utf8');
+    const viewerCss = fs.readFileSync(path.join(__dirname, '..', 'src', 'media-viewer.css'), 'utf8');
+    const bindVideoSource = viewerSource.slice(
+        viewerSource.indexOf('function bindActiveVideo'),
+        viewerSource.indexOf('function togglePlayback')
+    );
+    const applyPlaybackSource = viewerSource.slice(
+        viewerSource.indexOf('function applyVideoPlaybackState'),
+        viewerSource.indexOf('function bindActiveVideo')
+    );
+
+    assert.match(viewerSource, /const storedVolume = localStorage\.getItem\(SAVED_VOLUME_KEY\);\s*const storedMuted = localStorage\.getItem\(SAVED_MUTED_KEY\);/);
+    assert.match(viewerSource, /const value = storedVolume === null \? 1 : Number\(storedVolume\);/);
+    assert.match(viewerSource, /if \(storedMuted === null && volumeValue === 0\) \{\s*volumeValue = 1;/);
+    assert.match(bindVideoSource, /video\.volume = savedVolume;\s*video\.muted = savedMuted \|\| savedVolume === 0;/);
+    assert.match(applyPlaybackSource, /video\.volume = playbackState\.volume;\s*video\.muted = playbackState\.muted;/);
+    assert.match(applyPlaybackSource, /saveVolume\(video\.volume\);\s*saveMuted\(video\.muted \|\| video\.volume === 0\);/);
+    assert.match(viewerSource, /saveVolume\(video\.volume\);\s*saveMuted\(video\.muted \|\| video\.volume === 0\);\s*updatePlayerControls\(\);/);
+    assert.match(viewerSource, /video\.muted = video\.volume === 0;\s*saveVolume\(video\.volume\);\s*saveMuted\(video\.muted\);/);
+    assert.match(viewerCss, /\.player-controls \{[\s\S]*background: rgba\(12, 13, 15, \.98\);/);
+    assert.match(viewerCss, /rgba\(255, 255, 255, \.28\) var\(--played, 0%\) var\(--buffered, 0%\)/);
+    assert.match(viewerCss, /\.media-viewer\.controls-hidden \.chrome \{\s*opacity: 0;\s*pointer-events: none;/);
+    assert.match(viewerCss, /\.media-viewer\.is-video:not\(\.video-expanded\)\.controls-hidden \.player-controls \{\s*opacity: 1;\s*pointer-events: auto;/);
 });
 
 test('keeps the Windows media viewer composited until the latest presentation commits', () => {

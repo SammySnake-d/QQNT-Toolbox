@@ -18,8 +18,32 @@ const CONTENT_TYPES = Object.freeze({
     '.mov': 'video/quicktime',
     '.mp4': 'video/mp4',
     '.ogv': 'video/ogg',
-    '.webm': 'video/webm'
+    '.webm': 'video/webm',
+    '.aac': 'audio/aac',
+    '.flac': 'audio/flac',
+    '.m4a': 'audio/mp4',
+    '.mp3': 'audio/mpeg',
+    '.oga': 'audio/ogg',
+    '.ogg': 'audio/ogg',
+    '.opus': 'audio/ogg',
+    '.wav': 'audio/wav',
+    '.weba': 'audio/webm'
 });
+
+const ALLOWED_CONTENT_TYPES = new Set(Object.values(CONTENT_TYPES));
+
+function getContentTypeForFormat(format) {
+    const formats = {
+        aac: 'audio/aac',
+        flac: 'audio/flac',
+        mov: 'audio/mp4',
+        mp3: 'audio/mpeg',
+        ogg: 'audio/ogg',
+        webm: 'audio/webm',
+        wav: 'audio/wav'
+    };
+    return formats[String(format || '').toLowerCase()] || '';
+}
 
 function parseByteRange(value, size) {
     const match = /^bytes=(\d*)-(\d*)$/i.exec(String(value || '').trim());
@@ -52,29 +76,30 @@ function createLocalMediaServer(options = {}) {
     let server = null;
     let startPromise = null;
 
-    function touchEntry(token, filePath) {
+    function touchEntry(token, entry) {
         entries.delete(token);
-        entries.set(token, filePath);
+        entries.set(token, entry);
     }
 
     function pruneEntries() {
         while (entries.size > maxEntries) {
-            const [token, filePath] = entries.entries().next().value;
+            const [token, entry] = entries.entries().next().value;
             entries.delete(token);
-            if (pathTokens.get(filePath) === token) {
-                pathTokens.delete(filePath);
+            if (pathTokens.get(entry.key) === token) {
+                pathTokens.delete(entry.key);
             }
         }
     }
 
     async function handleRequest(request, response) {
         const token = new URL(request.url || '/', 'http://127.0.0.1').pathname.split('/')[1];
-        const filePath = entries.get(token);
+        const entry = entries.get(token);
+        const filePath = entry?.filePath;
         if (!filePath || !['GET', 'HEAD'].includes(request.method || 'GET')) {
             response.writeHead(404).end();
             return;
         }
-        touchEntry(token, filePath);
+        touchEntry(token, entry);
         let stat;
         try {
             stat = await fs.promises.stat(filePath);
@@ -99,7 +124,7 @@ function createLocalMediaServer(options = {}) {
             'Access-Control-Allow-Origin': '*',
             'Cache-Control': 'private, max-age=300',
             'Content-Length': end - start + 1,
-            'Content-Type': CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
+            'Content-Type': entry.contentType || CONTENT_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
             'Cross-Origin-Resource-Policy': 'cross-origin'
         };
         if (range) {
@@ -144,16 +169,22 @@ function createLocalMediaServer(options = {}) {
         return await startPromise;
     }
 
-    async function getUrl(filePath) {
+    async function getUrl(filePath, options = {}) {
         const normalizedPath = path.resolve(String(filePath || ''));
-        let token = pathTokens.get(normalizedPath);
+        const requestedContentType = String(options.contentType || '').toLowerCase().trim();
+        const formatContentType = getContentTypeForFormat(options.format);
+        const contentType = ALLOWED_CONTENT_TYPES.has(requestedContentType)
+            ? requestedContentType
+            : formatContentType;
+        const key = `${normalizedPath}\u0000${contentType}`;
+        let token = pathTokens.get(key);
         if (!token) {
             token = crypto.randomBytes(18).toString('hex');
-            pathTokens.set(normalizedPath, token);
-            entries.set(token, normalizedPath);
+            pathTokens.set(key, token);
+            entries.set(token, { filePath: normalizedPath, contentType, key });
             pruneEntries();
         } else {
-            touchEntry(token, normalizedPath);
+            touchEntry(token, entries.get(token));
         }
         const port = await start();
         return `http://127.0.0.1:${port}/${token}/${encodeURIComponent(path.basename(normalizedPath))}`;
@@ -172,5 +203,6 @@ function createLocalMediaServer(options = {}) {
 
 module.exports = {
     createLocalMediaServer,
+    getContentTypeForFormat,
     parseByteRange
 };

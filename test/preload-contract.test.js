@@ -88,6 +88,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.saveMessageImage({ data: new Uint8Array(8), count: 1 });
     await api.getMessageImageLibrary();
     await api.runMessageImageLibraryAction({ type: 'refresh' });
+    await api.getOnlineVoiceSources();
+    await api.runOnlineVoiceSourceAction({ type: 'import', input: 'https://example.test/source.js' });
     api.markForwardOpenIntent();
     await api.repeatMessage({ id: 'repeat' });
     assert.equal(api.getPathForFile({ mockPath: 'D:\\video.mp4' }), 'D:\\video.mp4');
@@ -139,6 +141,8 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:save-message-image',
         'qqnt-toolbox:get-message-image-library',
         'qqnt-toolbox:message-image-library-action',
+        'qqnt-toolbox:get-online-voice-sources',
+        'qqnt-toolbox:online-voice-source-action',
         'qqnt-toolbox:repeat-message',
         'qqnt-toolbox:stage-fake-forward-image',
         'qqnt-toolbox:resolve-fake-forward-sender-name',

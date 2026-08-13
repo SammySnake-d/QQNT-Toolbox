@@ -26,6 +26,7 @@ import {
     getMessageImageSenderMetadata
 } from './message-to-image.js';
 import { createMessageImageManager } from './message-image-manager.js';
+import { createOnlineSourceManager } from './online-source-manager.js';
 import {
     installCkeditorReplyAtGuard,
     installReplyAtInsertGuard
@@ -170,6 +171,7 @@ let handleToolboxVueComponentMount = () => {};
         },
         voiceMessage: {
             enabled: false,
+            keepPlayingAcrossChats: false,
             saveInContextMenu: false,
             forwardInContextMenu: false,
             fakeDurationEnabled: false,
@@ -313,6 +315,7 @@ let handleToolboxVueComponentMount = () => {};
     let localStickerController = null;
     let localStickerManager = null;
     let messageImageManager = null;
+    let onlineVoiceSourceManager = null;
     let interfaceObserver = null;
     let interfaceRefreshTimer = 0;
     let unreadCountObserver = null;
@@ -875,6 +878,16 @@ let handleToolboxVueComponentMount = () => {};
             });
         }
         return messageImageManager;
+    }
+
+    function getOnlineVoiceSourceManager() {
+        if (!onlineVoiceSourceManager) {
+            onlineVoiceSourceManager = createOnlineSourceManager({
+                getState: () => getBridge()?.getOnlineVoiceSources?.(),
+                action: request => getBridge()?.runOnlineVoiceSourceAction?.(request)
+            });
+        }
+        return onlineVoiceSourceManager;
     }
 
     function syncReactionLimitFeature() {
@@ -2209,6 +2222,19 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         );
     }
 
+    function createOnlineVoiceSourceManagerItem() {
+        return createActionItem(
+            text('在线音源'),
+            text('导入和管理 LXMusic、CeruMusic、QT 与 MusicFree 音源'),
+            'manageOnlineVoiceSources',
+            {
+                label: text('管理'),
+                requires: 'voiceMessage.enabled',
+                child: true
+            }
+        );
+    }
+
     function createColorPairItem(name, meta, lightPath, darkPath, options = {}) {
         const item = createElement('div', 'qqnt-toolbox-item');
         item.dataset.colorItem = 'true';
@@ -2515,6 +2541,11 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     }
                 ),
                 createSwitchItem(text('语音消息'), text('拖拽发送与语音库'), 'voiceMessage.enabled'),
+                createSwitchItem(text('切换聊天继续播放'), text('切换或关闭聊天页时保持播放与进度'), 'voiceMessage.keepPlayingAcrossChats', {
+                    requires: 'voiceMessage.enabled',
+                    child: true
+                }),
+                createOnlineVoiceSourceManagerItem(),
                 createSwitchItem(text('右键保存语音'), text('在语音消息右键菜单中显示“保存”'), 'voiceMessage.saveInContextMenu', {
                     requires: 'voiceMessage.enabled',
                     child: true
@@ -3558,6 +3589,10 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }
         if (action === 'manageMessageImages') {
             getMessageImageManager().open(button);
+            return;
+        }
+        if (action === 'manageOnlineVoiceSources') {
+            getOnlineVoiceSourceManager().open(button);
             return;
         }
         if (action === 'manageAutoDownloadGroups') {

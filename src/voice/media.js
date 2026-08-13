@@ -13,7 +13,17 @@ const VOICE_WAVE_BIN_COUNT = 17;
 const VOICE_WAVE_MAX_AMPLITUDE = 99;
 const VOICE_WAVE_NOISE_FLOOR_DB = -60;
 
+const AUDIO_EXTENSIONS = new Set([
+    '.aac', '.ac3', '.amr', '.audio', '.eac3', '.flac', '.m4a', '.mp3', '.oga', '.ogg',
+    '.opus', '.wav', '.weba', '.webm', '.wv'
+]);
+const VIDEO_EXTENSIONS = new Set([
+    '.3g2', '.3gp', '.asf', '.avi', '.flv', '.m2ts', '.m4v', '.mkv', '.mov',
+    '.mp4', '.mpeg', '.mpg', '.ogv', '.ts', '.webm', '.wmv'
+]);
+
 let silkWasm = null;
+let silentSilkFramePromise = null;
 
 function getSilkWasm() {
     if (!silkWasm) {
@@ -53,6 +63,169 @@ async function runTool(toolName, args, options = {}) {
         }
     }
     throw new Error(`${toolName} was not found. Put it in PATH or set ${toolName.toUpperCase()}_PATH.`);
+}
+
+function isAudioMediaPath(filePath) {
+    const extension = path.extname(String(filePath || '')).toLowerCase();
+    return AUDIO_EXTENSIONS.has(extension) && !VIDEO_EXTENSIONS.has(extension);
+}
+
+function isVideoMediaPath(filePath) {
+    return VIDEO_EXTENSIONS.has(path.extname(String(filePath || '')).toLowerCase());
+}
+
+function detectMediaInputFormat(filePath) {
+    let fd;
+    try {
+        fd = fsSync.openSync(filePath, 'r');
+        const header = Buffer.alloc(16);
+        const bytesRead = fsSync.readSync(fd, header, 0, header.length, 0);
+        if (bytesRead >= 3 && header.subarray(0, 3).toString('latin1') === 'ID3') return 'mp3';
+        if (bytesRead >= 4 && header.subarray(0, 4).toString('latin1') === 'fLaC') return 'flac';
+        if (bytesRead >= 4 && header.subarray(0, 4).toString('latin1') === 'OggS') return 'ogg';
+        if (bytesRead >= 12 && header.subarray(0, 4).toString('latin1') === 'RIFF' &&
+            header.subarray(8, 12).toString('latin1') === 'WAVE') return 'wav';
+        if (bytesRead >= 12 && header.subarray(4, 8).toString('latin1') === 'ftyp') return 'mov';
+        if (bytesRead >= 4 && header.subarray(0, 4).toString('latin1') === 'wvpk') return 'wv';
+        if (bytesRead >= 4 && header[0] === 0x1a && header[1] === 0x45 && header[2] === 0xdf && header[3] === 0xa3) return 'matroska';
+        if (bytesRead >= 4 && header.subarray(0, 4).toString('latin1') === 'ADIF') return 'aac';
+        if (bytesRead >= 2 && header[0] === 0xff && (header[1] & 0xf6) === 0xf0) return 'aac';
+        if (bytesRead >= 2 && header[0] === 0xff && (header[1] & 0xe0) === 0xe0 && (header[1] & 0x06) !== 0) return 'mp3';
+        if (bytesRead >= 2 && header[0] === 0x0b && header[1] === 0x77) return 'ac3';
+    } catch {
+    } finally {
+        if (fd !== undefined) {
+            try {
+                fsSync.closeSync(fd);
+            } catch {
+            }
+        }
+    }
+    return '';
+}
+
+function getMediaInputArgs(filePath) {
+    const format = detectMediaInputFormat(filePath);
+    return [...(format ? ['-f', format] : []), '-i', filePath];
+}
+
+function getLosslessAudioExtractionPlan(codecName, sourceExtension = '') {
+    const codec = String(codecName || '').trim().toLowerCase();
+    const sourceExt = String(sourceExtension || '').toLowerCase();
+    const plans = {
+        aac: { extension: '.m4a', format: 'ipod' },
+        alac: { extension: '.m4a', format: 'ipod' },
+        mp3: { extension: '.mp3', format: 'mp3' },
+        opus: { extension: '.ogg', format: 'ogg' },
+        vorbis: { extension: '.ogg', format: 'ogg' },
+        flac: { extension: '.flac', format: 'flac' },
+        wavpack: { extension: '.wv', format: 'wv' },
+        amr_nb: { extension: '.amr', format: 'amr' },
+        amr_wb: { extension: '.amr', format: 'amr' },
+        ac3: { extension: '.ac3', format: 'ac3' },
+        eac3: { extension: '.eac3', format: 'eac3' },
+        pcm_s16le: { extension: '.wav', format: 'wav' },
+        pcm_s16be: { extension: '.wav', format: 'wav' },
+        pcm_s24le: { extension: '.wav', format: 'wav' },
+        pcm_s24be: { extension: '.wav', format: 'wav' },
+        pcm_s32le: { extension: '.wav', format: 'wav' },
+        pcm_s32be: { extension: '.wav', format: 'wav' }
+    };
+    if (plans[codec]) {
+        return { ...plans[codec] };
+    }
+    // A source that is already an audio-only container can often be copied
+    // without remuxing. For video containers use Matroska as the permissive
+    // fallback; it keeps the compressed stream untouched.
+    if (!VIDEO_EXTENSIONS.has(sourceExt) && AUDIO_EXTENSIONS.has(sourceExt)) {
+        return { extension: sourceExt, format: '' };
+    }
+    return { extension: '.mka', format: 'matroska' };
+}
+
+async function probeAudioStream(inputPath) {
+    const { stdout } = await runTool('ffprobe', [
+        '-v', 'error',
+        ...getMediaInputArgs(inputPath),
+        '-select_streams', 'a:0',
+        '-show_entries', 'stream=codec_name,duration,sample_rate,channels:format=duration,format_name',
+        '-of', 'json'
+    ]);
+    let parsed;
+    try {
+        parsed = JSON.parse(String(stdout || '{}'));
+    } catch {
+        parsed = {};
+    }
+    const stream = Array.isArray(parsed?.streams) ? parsed.streams[0] : null;
+    if (!stream?.codec_name) {
+        throw new Error('No audio track was found in this media file.');
+    }
+    const streamDuration = Number(stream.duration);
+    const formatDuration = Number(parsed?.format?.duration);
+    const duration = Number.isFinite(streamDuration) && streamDuration > 0
+        ? streamDuration
+        : formatDuration;
+    return {
+        codecName: String(stream.codec_name).toLowerCase(),
+        formatName: String(parsed?.format?.format_name || '').toLowerCase(),
+        durationMs: Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : 0,
+        sampleRate: Number(stream.sample_rate) || 0,
+        channels: Number(stream.channels) || 0
+    };
+}
+
+async function extractAudioTrackWithoutReencoding(inputPath, options = {}) {
+    if (!inputPath || !fsSync.existsSync(inputPath)) {
+        throw new Error(`Media file was not found: ${inputPath}`);
+    }
+    const stream = options.stream || await probeAudioStream(inputPath);
+    const plan = getLosslessAudioExtractionPlan(stream.codecName, path.extname(inputPath));
+    const outputDir = options.outputDir || path.dirname(inputPath);
+    await fs.mkdir(outputDir, { recursive: true });
+    const stem = path.basename(inputPath, path.extname(inputPath))
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+        .slice(0, 70) || 'audio';
+    const outputPath = path.join(
+        outputDir,
+        `${stem}.${Date.now().toString(36)}-${cryptoRandomSuffix()}${plan.extension}`
+    );
+    const args = [
+        '-v', 'error',
+        '-y',
+        ...getMediaInputArgs(inputPath),
+        '-map', '0:a:0',
+        '-vn',
+        '-c:a', 'copy',
+        '-map_metadata', '-1'
+    ];
+    if (plan.format) {
+        args.push('-f', plan.format);
+    }
+    args.push(outputPath);
+    try {
+        await runTool('ffmpeg', args);
+        const stat = await fs.stat(outputPath);
+        if (!stat.size) {
+            throw new Error('FFmpeg produced an empty audio track.');
+        }
+        return {
+            path: outputPath,
+            extension: plan.extension,
+            codecName: stream.codecName,
+            durationMs: stream.durationMs,
+            sourcePath: inputPath,
+            reencoded: false
+        };
+    } catch (error) {
+        await fs.unlink(outputPath).catch(() => {});
+        const detail = error?.message || String(error);
+        throw new Error(`The video audio track could not be extracted without re-encoding: ${detail}`);
+    }
+}
+
+function cryptoRandomSuffix() {
+    return Math.random().toString(36).slice(2, 10);
 }
 
 function toBufferView(data) {
@@ -105,6 +278,30 @@ function isSilkFile(filePath) {
             }
         }
     }
+}
+
+function isAmrFile(filePath) {
+    let fd;
+    try {
+        fd = fsSync.openSync(filePath, 'r');
+        const header = Buffer.alloc(9);
+        const bytesRead = fsSync.readSync(fd, header, 0, header.length, 0);
+        const magic = header.subarray(0, bytesRead).toString('latin1');
+        return magic.startsWith('#!AMR\n') || magic.startsWith('#!AMR-WB\n');
+    } catch {
+        return false;
+    } finally {
+        if (fd !== undefined) {
+            try {
+                fsSync.closeSync(fd);
+            } catch {
+            }
+        }
+    }
+}
+
+function isQqNativePttFile(filePath) {
+    return isSilkFile(filePath) || isAmrFile(filePath);
 }
 
 function toExactArrayBuffer(data) {
@@ -287,6 +484,40 @@ async function encodeToSilk(inputData, sampleRate) {
     }
 }
 
+async function createSilentSilk(durationMs) {
+    const normalizedDuration = Math.max(20, Math.ceil(Number(durationMs) || 1000));
+    const frameCount = Math.max(1, Math.ceil(normalizedDuration / 20));
+    if (!silentSilkFramePromise) {
+        silentSilkFramePromise = encodeToSilk(
+            Buffer.alloc(TARGET_SILK_SAMPLE_RATE * 2),
+            TARGET_SILK_SAMPLE_RATE
+        ).then(silkResult => {
+            if (silkResult.error) {
+                throw new Error(silkResult.error);
+            }
+            const repaired = repairSilkFrames(silkResult.data.data);
+            const frameStart = getSilkFrameStart(repaired.data);
+            const frameSize = frameStart >= 0 && repaired.data.length >= frameStart + 2
+                ? repaired.data.readUInt16LE(frameStart)
+                : 0;
+            if (!frameSize || repaired.data.length < frameStart + 2 + frameSize) {
+                throw new Error('The silent Silk clock contains no valid audio frames.');
+            }
+            return Buffer.from(repaired.data.subarray(frameStart, frameStart + 2 + frameSize));
+        }).catch(error => {
+            silentSilkFramePromise = null;
+            throw error;
+        });
+    }
+    const frame = await silentSilkFramePromise;
+    const header = Buffer.from('\x02#!SILK_V3', 'latin1');
+    return {
+        data: Buffer.concat([header, ...Array(frameCount).fill(frame)]),
+        duration: frameCount * 20,
+        sampleRate: TARGET_SILK_SAMPLE_RATE
+    };
+}
+
 function parseLoudnessMeasurements(output) {
     const blocks = String(output || '').match(/\{[\s\S]*?\}/g) || [];
     for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -307,7 +538,7 @@ async function measureMediaLoudness(mediaPath) {
     const { stderr } = await runTool('ffmpeg', [
         '-v', 'info',
         '-nostats',
-        '-i', mediaPath,
+        ...getMediaInputArgs(mediaPath),
         '-map', '0:a:0',
         '-vn',
         '-af', `aresample=out_chlayout=mono,loudnorm=I=${TARGET_VOICE_LOUDNESS_LUFS}:TP=${TARGET_VOICE_TRUE_PEAK_DB}:LRA=11:print_format=json`,
@@ -333,7 +564,7 @@ async function convertMediaToPcm24k(mediaPath) {
     const { stdout } = await runTool('ffmpeg', [
         '-v', 'error',
         '-y',
-        '-i', mediaPath,
+        ...getMediaInputArgs(mediaPath),
         '-map', '0:a:0',
         '-vn',
         '-af', filters.join(','),
@@ -403,10 +634,19 @@ async function decodeSilkToPcm(silkData) {
 
 module.exports = {
     TARGET_SILK_SAMPLE_RATE,
+    createSilentSilk,
     decodeSilkToPcm,
+    detectMediaInputFormat,
     encodeMediaFileToSilk,
     estimateSilkDurationMs,
+    extractAudioTrackWithoutReencoding,
+    getLosslessAudioExtractionPlan,
+    getMediaInputArgs,
+    isAudioMediaPath,
+    isQqNativePttFile,
+    isVideoMediaPath,
     isSilkFile,
     makePcm16Wav,
+    probeAudioStream,
     runTool
 };

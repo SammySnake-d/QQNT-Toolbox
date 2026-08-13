@@ -5,7 +5,15 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { createLocalMediaServer, parseByteRange } = require('../src/local-media-server');
+const { createLocalMediaServer, getContentTypeForFormat, parseByteRange } = require('../src/local-media-server');
+
+test('maps detected audio bytes to browser media types when cache extensions lie', () => {
+    assert.equal(getContentTypeForFormat('mp3'), 'audio/mpeg');
+    assert.equal(getContentTypeForFormat('mov'), 'audio/mp4');
+    assert.equal(getContentTypeForFormat('flac'), 'audio/flac');
+    assert.equal(getContentTypeForFormat('webm'), 'audio/webm');
+    assert.equal(getContentTypeForFormat('matroska'), '');
+});
 
 test('parses normal, open-ended, and suffix byte ranges', () => {
     assert.deepEqual(parseByteRange('bytes=2-5', 10), { start: 2, end: 5 });
@@ -49,6 +57,24 @@ test('serves images with a browser-decodable content type and cache policy', asy
     assert.equal(response.headers.get('content-type'), 'image/webp');
     assert.equal(response.headers.get('cache-control'), 'private, max-age=300');
     assert.equal(await response.text(), 'image');
+});
+
+test('overrides a misleading QQ cache extension with a validated audio content type', async t => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qqnt-toolbox-media-'));
+    const filePath = path.join(directory, 'original-voice.jpg');
+    fs.writeFileSync(filePath, Buffer.from('ID3audio-bytes'));
+    const server = createLocalMediaServer();
+    t.after(() => {
+        server.close();
+        fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    const url = await server.getUrl(filePath, { contentType: 'audio/mpeg' });
+    const response = await fetch(url, { headers: { Range: 'bytes=3-' } });
+
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get('content-type'), 'audio/mpeg');
+    assert.equal(await response.text(), 'audio-bytes');
 });
 
 test('does not guess whether a missing media file has finished downloading', async t => {

@@ -18,6 +18,8 @@
     const SPEEDS = [0.5, 1, 1.5, 2];
     const BACKGROUNDS = new Set(['transparent', 'white', 'semi', 'black']);
     const MEDIA_STAGE_MIN_TOP = 11;
+    const SAVED_VOLUME_KEY = 'qqnt-toolbox-media-volume';
+    const SAVED_MUTED_KEY = 'qqnt-toolbox-media-muted';
 
     const viewer = document.getElementById('media-viewer');
     const stage = document.getElementById('media-stage');
@@ -99,7 +101,9 @@
     let controlsPointerAnchor = null;
     let nativeFallbackKey = '';
     let frameCopyPending = false;
-    let savedVolume = readSavedVolume();
+    const savedAudioState = readSavedAudioState();
+    let savedVolume = savedAudioState.volume;
+    let savedMuted = savedAudioState.muted;
     let savedPlaybackRate = readSavedPlaybackRate();
     let lastPositiveVolume = savedVolume > 0 ? savedVolume : 1;
 
@@ -160,12 +164,22 @@
         };
     }
 
-    function readSavedVolume() {
+    function readSavedAudioState() {
         try {
-            const value = Number(localStorage.getItem('qqnt-toolbox-media-volume'));
-            return Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 1;
+            const storedVolume = localStorage.getItem(SAVED_VOLUME_KEY);
+            const storedMuted = localStorage.getItem(SAVED_MUTED_KEY);
+            const value = storedVolume === null ? 1 : Number(storedVolume);
+            let volumeValue = Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 1;
+            // Older builds treated a missing localStorage value as numeric zero.
+            if (storedMuted === null && volumeValue === 0) {
+                volumeValue = 1;
+            }
+            return {
+                volume: volumeValue,
+                muted: storedMuted === 'true' || volumeValue === 0
+            };
         } catch {
-            return 1;
+            return { volume: 1, muted: false };
         }
     }
 
@@ -175,7 +189,15 @@
             lastPositiveVolume = savedVolume;
         }
         try {
-            localStorage.setItem('qqnt-toolbox-media-volume', String(savedVolume));
+            localStorage.setItem(SAVED_VOLUME_KEY, String(savedVolume));
+        } catch {
+        }
+    }
+
+    function saveMuted(value) {
+        savedMuted = value === true;
+        try {
+            localStorage.setItem(SAVED_MUTED_KEY, String(savedMuted));
         } catch {
         }
     }
@@ -662,11 +684,12 @@
     }
 
     function setVideoFullscreen(enabled) {
-        const next = Boolean(enabled);
+        const next = Boolean(enabled) && activeMedia?.tagName === 'VIDEO';
         viewer.classList.toggle('video-expanded', next);
         videoFullscreen.classList.toggle('is-fullscreen', next);
         videoFullscreen.setAttribute('aria-pressed', String(next));
         videoFullscreen.setAttribute('aria-label', next ? '退出全屏播放' : '全屏播放');
+        showControls(next);
         if (activeMedia) {
             requestAnimationFrame(() => {
                 fitMediaToStage();
@@ -734,6 +757,7 @@
             video.currentTime = playbackState.currentTime;
         }
         saveVolume(video.volume);
+        saveMuted(video.muted || video.volume === 0);
         savedPlaybackRate = video.playbackRate;
         try {
             localStorage.setItem('qqnt-toolbox-media-playback-rate', String(savedPlaybackRate));
@@ -750,6 +774,7 @@
 
     function bindActiveVideo(video, playbackState = null) {
         video.volume = savedVolume;
+        video.muted = savedMuted || savedVolume === 0;
         video.playbackRate = savedPlaybackRate;
         const listeners = [];
         const on = (name, listener) => {
@@ -1011,9 +1036,16 @@
         return navigateTo(state.index + delta);
     }
 
+    function canAutoHideControls() {
+        return activeMedia?.tagName === 'VIDEO';
+    }
+
     function hideControls() {
-        if (controlsHidden || menuOpen || settingsMenuOpen || panState || rangeAdjusting ||
-            activeMedia?.tagName === 'VIDEO' && activeMedia.paused) {
+        if (!canAutoHideControls()) {
+            showControls(false);
+            return;
+        }
+        if (controlsHidden || menuOpen || settingsMenuOpen || panState || rangeAdjusting) {
             return;
         }
         controlsPointerAnchor = latestPointer ? { ...latestPointer } : null;
@@ -1023,6 +1055,10 @@
 
     function scheduleControlsHide() {
         clearTimeout(controlsTimer);
+        if (!canAutoHideControls()) {
+            showControls(false);
+            return;
+        }
         controlsTimer = window.setTimeout(hideControls, CONTROL_HIDE_DELAY_MS);
     }
 
@@ -1032,7 +1068,7 @@
             viewer.classList.remove('controls-hidden');
         }
         clearTimeout(controlsTimer);
-        if (schedule) {
+        if (schedule && canAutoHideControls()) {
             scheduleControlsHide();
         }
     }
@@ -1335,7 +1371,6 @@
             return;
         }
         setVideoFullscreen(!viewer.classList.contains('video-expanded'));
-        showControls(false);
     });
     playerSettings.addEventListener('click', event => {
         event.stopPropagation();
@@ -1373,6 +1408,8 @@
             lastPositiveVolume = video.volume;
             video.muted = true;
         }
+        saveVolume(video.volume);
+        saveMuted(video.muted || video.volume === 0);
         updatePlayerControls();
     });
     volume.addEventListener('input', () => {
@@ -1383,6 +1420,7 @@
         video.volume = Number(volume.value);
         video.muted = video.volume === 0;
         saveVolume(video.volume);
+        saveMuted(video.muted);
         updatePlayerControls();
     });
     pictureInPicture.addEventListener('click', async event => {
@@ -1651,7 +1689,6 @@
                 closeMoreMenu(true);
             } else if (viewer.classList.contains('video-expanded')) {
                 setVideoFullscreen(false);
-                showControls();
             } else {
                 concealMedia();
                 activeMedia?.pause?.();
@@ -1666,7 +1703,6 @@
             event.preventDefault();
             event.stopPropagation();
             setVideoFullscreen(!viewer.classList.contains('video-expanded'));
-            showControls(false);
             return;
         }
         let handled = true;

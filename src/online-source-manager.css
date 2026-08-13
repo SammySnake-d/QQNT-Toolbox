@@ -1,0 +1,286 @@
+#qqnt-toolbox-online-source-manager {
+    --qosm-surface: var(--bg_top_light, var(--background-05, var(--background-01, #fff)));
+    --qosm-text: var(--text-primary, var(--text_primary, var(--text-01, #1f2329)));
+    --qosm-muted: var(--text-secondary, var(--text_secondary, var(--text-02, #6b7280)));
+    --qosm-border: var(--border-level-1-color, var(--divider, rgba(127, 127, 127, .18)));
+    --qosm-fill: var(--fill_light_primary, var(--background-02, rgba(127, 127, 127, .09)));
+    --qosm-hover: var(--overlay_hover, rgba(127, 127, 127, .11));
+    --qosm-accent: var(--brand_standard, var(--brand-primary, #2f6bff));
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    display: grid;
+    place-items: center;
+    padding: 16px;
+    box-sizing: border-box;
+    color: var(--qosm-text);
+    background: rgba(0, 0, 0, .38);
+    font: 13px/1.45 var(--font-family, "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
+    letter-spacing: 0;
+    -webkit-app-region: no-drag;
+}
+
+#qqnt-toolbox-online-source-manager *,
+#qqnt-toolbox-online-source-manager *::before,
+#qqnt-toolbox-online-source-manager *::after {
+    box-sizing: border-box;
+    letter-spacing: 0;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-page {
+    position: relative;
+    display: grid;
+    grid-template-rows: 48px minmax(0, 1fr);
+    width: min(620px, calc(100vw - 32px));
+    height: min(480px, calc(100vh - 32px));
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--qosm-border);
+    border-radius: 8px;
+    background: var(--qosm-surface);
+    box-shadow: var(--shadow-bg-middle-primary, 0 14px 42px rgba(0, 0, 0, .24));
+}
+
+#qqnt-toolbox-online-source-manager .qosm-header,
+#qqnt-toolbox-online-source-manager .qosm-heading,
+#qqnt-toolbox-online-source-manager .qosm-header-actions,
+#qqnt-toolbox-online-source-manager .qosm-source,
+#qqnt-toolbox-online-source-manager .qosm-dialog-actions {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-header {
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 10px 0 18px;
+    border-bottom: 1px solid var(--qosm-border);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-heading {
+    gap: 8px;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-count,
+#qqnt-toolbox-online-source-manager .qosm-source-description,
+#qqnt-toolbox-online-source-manager .qosm-source-meta,
+#qqnt-toolbox-online-source-manager .qosm-status,
+#qqnt-toolbox-online-source-manager .qosm-dialog-message {
+    color: var(--qosm-muted);
+    font-size: 12px;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-header-actions {
+    flex: none;
+    gap: 6px;
+}
+
+#qqnt-toolbox-online-source-manager button {
+    border: 0;
+    color: var(--qosm-text);
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-button {
+    height: 30px;
+    padding: 0 11px;
+    border: 1px solid var(--qosm-border);
+    border-radius: 6px;
+    background: var(--qosm-fill);
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-primary {
+    color: #fff;
+    border-color: var(--qosm-accent);
+    background: var(--qosm-accent);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-danger {
+    color: var(--text_error, #e5484d);
+    border-color: color-mix(in srgb, var(--text_error, #e5484d) 38%, var(--qosm-border));
+}
+
+#qqnt-toolbox-online-source-manager .qosm-icon-button,
+#qqnt-toolbox-online-source-manager .qosm-close {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border-radius: 6px;
+    color: var(--qosm-muted);
+    font: 20px/1 sans-serif;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-icon-button {
+    font-size: 21px;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-button:hover:not(:disabled),
+#qqnt-toolbox-online-source-manager .qosm-icon-button:hover:not(:disabled),
+#qqnt-toolbox-online-source-manager .qosm-close:hover,
+#qqnt-toolbox-online-source-manager .qosm-delete:hover:not(:disabled) {
+    background: var(--qosm-hover);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-primary:hover:not(:disabled) {
+    filter: brightness(.94);
+}
+
+#qqnt-toolbox-online-source-manager button:disabled {
+    cursor: default;
+    opacity: .5;
+}
+
+#qqnt-toolbox-online-source-manager button:focus-visible,
+#qqnt-toolbox-online-source-manager textarea:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--qosm-accent) 48%, transparent);
+    outline-offset: 1px;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-body {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    min-height: 0;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-list {
+    min-height: 0;
+    padding: 8px;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-source {
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 70px;
+    padding: 10px;
+    border-radius: 6px;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-source:hover {
+    background: var(--qosm-hover);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-source-details {
+    min-width: 0;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-source-name,
+#qqnt-toolbox-online-source-manager .qosm-source-description {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-source-name {
+    font-weight: 600;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-source-description {
+    margin-top: 2px;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-source-meta {
+    margin-top: 3px;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-delete {
+    flex: none;
+    height: 28px;
+    padding: 0 8px;
+    border-radius: 5px;
+    color: var(--text_error, #e5484d);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-empty {
+    display: grid;
+    place-items: center;
+    height: 100%;
+    min-height: 160px;
+    color: var(--qosm-muted);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-status {
+    min-height: 30px;
+    padding: 7px 14px;
+    border-top: 1px solid var(--qosm-border);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-status[data-state="error"] {
+    color: var(--text_error, #e5484d);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-status[data-state="success"] {
+    color: var(--qosm-accent);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-dialog-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+    padding: 18px;
+    background: rgba(0, 0, 0, .24);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-dialog {
+    display: grid;
+    width: min(480px, 100%);
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--qosm-border);
+    border-radius: 8px;
+    background: var(--qosm-surface);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .22);
+}
+
+#qqnt-toolbox-online-source-manager .qosm-dialog-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-dialog-input {
+    width: 100%;
+    min-height: 128px;
+    padding: 8px 9px;
+    resize: vertical;
+    border: 1px solid var(--qosm-border);
+    border-radius: 6px;
+    outline: 0;
+    color: var(--qosm-text) !important;
+    -webkit-text-fill-color: var(--qosm-text) !important;
+    caret-color: var(--qosm-text);
+    background: var(--qosm-fill) !important;
+    font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+#qqnt-toolbox-online-source-manager .qosm-dialog-actions {
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+@media (max-width: 500px) {
+    #qqnt-toolbox-online-source-manager {
+        padding: 10px;
+    }
+
+    #qqnt-toolbox-online-source-manager .qosm-page {
+        width: calc(100vw - 20px);
+        height: min(480px, calc(100vh - 20px));
+    }
+}

@@ -22,6 +22,8 @@ const CHANNEL_CHOOSE_MESSAGE_IMAGE_DIRECTORY = 'qqnt-toolbox:choose-message-imag
 const CHANNEL_SAVE_MESSAGE_IMAGE = 'qqnt-toolbox:save-message-image';
 const CHANNEL_GET_MESSAGE_IMAGE_LIBRARY = 'qqnt-toolbox:get-message-image-library';
 const CHANNEL_MESSAGE_IMAGE_LIBRARY_ACTION = 'qqnt-toolbox:message-image-library-action';
+const CHANNEL_GET_ONLINE_VOICE_SOURCES = 'qqnt-toolbox:get-online-voice-sources';
+const CHANNEL_ONLINE_VOICE_SOURCE_ACTION = 'qqnt-toolbox:online-voice-source-action';
 const CHANNEL_FORWARD_OPEN_INTENT = 'qqnt-toolbox:forward-open-intent';
 const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
@@ -85,6 +87,8 @@ module.exports = Object.freeze({
     CHANNEL_SAVE_MESSAGE_IMAGE,
     CHANNEL_GET_MESSAGE_IMAGE_LIBRARY,
     CHANNEL_MESSAGE_IMAGE_LIBRARY_ACTION,
+    CHANNEL_GET_ONLINE_VOICE_SOURCES,
+    CHANNEL_ONLINE_VOICE_SOURCE_ACTION,
     CHANNEL_FORWARD_OPEN_INTENT,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,

@@ -413,8 +413,8 @@ svg {
     overflow: visible;
     border-radius: 9px;
     color: #fff;
-    background: rgba(28, 29, 32, .96);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, .34);
+    background: rgba(12, 13, 15, .98);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .5), 0 0 0 1px rgba(255, 255, 255, .035);
     transform: translateX(-50%);
 }
 
@@ -506,15 +506,15 @@ svg {
     height: 3px;
     border-radius: 2px;
     background: linear-gradient(90deg,
-        rgba(255, 255, 255, .96) 0 var(--played, 0%),
-        rgba(255, 255, 255, .38) var(--played, 0%) var(--buffered, 0%),
-        rgba(255, 255, 255, .18) var(--buffered, 0%) 100%);
+        rgba(255, 255, 255, .92) 0 var(--played, 0%),
+        rgba(255, 255, 255, .28) var(--played, 0%) var(--buffered, 0%),
+        rgba(255, 255, 255, .13) var(--buffered, 0%) 100%);
 }
 
 .player-volume::-webkit-slider-runnable-track {
     background: linear-gradient(90deg,
-        rgba(255, 255, 255, .9) 0 var(--volume, 100%),
-        rgba(255, 255, 255, .18) var(--volume, 100%) 100%);
+        rgba(255, 255, 255, .84) 0 var(--volume, 100%),
+        rgba(255, 255, 255, .14) var(--volume, 100%) 100%);
 }
 
 .player-seek::-webkit-slider-thumb,
@@ -524,7 +524,7 @@ svg {
     margin-top: -4.5px;
     border: 0;
     border-radius: 50%;
-    background: #fff;
+    background: #f4f5f6;
     -webkit-appearance: none;
 }
 
@@ -759,6 +759,13 @@ svg {
     opacity: 0;
     pointer-events: none;
     transition-duration: 600ms;
+}
+
+/* Telegram keeps the windowed playback bar available while the surrounding chrome fades. */
+.media-viewer.is-video:not(.video-expanded).controls-hidden .player-controls {
+    opacity: 1;
+    pointer-events: auto;
+    transition-duration: 200ms;
 }
 
 .media-viewer.controls-hidden .media-slot:not(.is-panning) {

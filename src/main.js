@@ -196,6 +196,8 @@ const {
     CHANNEL_SAVE_MESSAGE_IMAGE,
     CHANNEL_GET_MESSAGE_IMAGE_LIBRARY,
     CHANNEL_MESSAGE_IMAGE_LIBRARY_ACTION,
+    CHANNEL_GET_ONLINE_VOICE_SOURCES,
+    CHANNEL_ONLINE_VOICE_SOURCE_ACTION,
     CHANNEL_FORWARD_OPEN_INTENT,
     CHANNEL_REPEAT_MESSAGE,
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
@@ -352,6 +354,7 @@ const DEFAULT_CONFIG = {
     },
     voiceMessage: {
         enabled: false,
+        keepPlayingAcrossChats: false,
         saveInContextMenu: false,
         forwardInContextMenu: false,
         fakeDurationEnabled: false,
@@ -812,6 +815,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
         },
         voice: {
             enabled: config.voiceMessage?.enabled === true,
+            keepPlayingAcrossChats: config.voiceMessage?.keepPlayingAcrossChats === true,
             saveContextMenu: config.voiceMessage?.saveInContextMenu === true,
             forwardContextMenu: config.voiceMessage?.forwardInContextMenu === true,
             fakeDuration: config.voiceMessage?.fakeDurationEnabled === true
@@ -1130,6 +1134,7 @@ async function runMessageImageLibraryAction(request) {
 }
 
 function normalizeSimplifyConfig(config) {
+    config.voiceMessage = config.voiceMessage || {};
     if (!INLINE_MEDIA_BACKGROUND_VALUES.has(config.interfaceTweaks?.inlineMediaBackground)) {
         config.interfaceTweaks.inlineMediaBackground = DEFAULT_CONFIG.interfaceTweaks.inlineMediaBackground;
     }
@@ -1256,6 +1261,10 @@ function isRepeatMessageEnabled() {
 
 function isVoiceMessageEnabled() {
     return getConfig().voiceMessage.enabled === true;
+}
+
+function shouldKeepVoicePlayingAcrossChats() {
+    return getConfig().voiceMessage.keepPlayingAcrossChats === true;
 }
 
 function isVoiceSaveInContextMenuEnabled() {
@@ -1419,7 +1428,17 @@ function getAutoPokeBackLimit() {
 
 function applyVoiceMessageConfig() {
     voiceFileSender?.setDiagnosticRecorder?.(recordDiagnostic);
+    voiceFileSender?.setNetworkFetch?.((url, options = {}) => getConfiguredNetworkSession('voice').then(session =>
+        session.fetch(url, {
+            ...options,
+            bypassCustomProtocolHandlers: true
+        })
+    ));
+    voiceFileSender?.setMediaUrlResolver?.((filePath, options = {}) =>
+        inlineMediaServer.getUrl(filePath, options)
+    );
     voiceFileSender?.setEnabled?.(isVoiceMessageEnabled());
+    voiceFileSender?.setKeepPlayingAcrossChats?.(shouldKeepVoicePlayingAcrossChats());
     voiceFileSender?.setSaveInContextMenuEnabled?.(isVoiceSaveInContextMenuEnabled());
     voiceFileSender?.setForwardInContextMenuEnabled?.(isVoiceForwardInContextMenuEnabled());
     voiceFileSender?.setFakeDurationSeconds?.(getFakeVoiceDurationSeconds());
@@ -3217,6 +3236,26 @@ function installConfigIpc() {
     ipcMain.handle(CHANNEL_MESSAGE_IMAGE_LIBRARY_ACTION, (_event, request) =>
         runMessageImageLibraryAction(request)
     );
+    ipcMain.handle(CHANNEL_GET_ONLINE_VOICE_SOURCES, async () => {
+        if (!voiceFileSender?.getOnlineSourceState) {
+            return {
+                ok: false,
+                reason: 'voice-module-unavailable',
+                message: '在线音源组件未正确加载'
+            };
+        }
+        return await voiceFileSender.getOnlineSourceState();
+    });
+    ipcMain.handle(CHANNEL_ONLINE_VOICE_SOURCE_ACTION, async (_event, request) => {
+        if (!voiceFileSender?.runOnlineSourceAction) {
+            return {
+                ok: false,
+                reason: 'voice-module-unavailable',
+                message: '在线音源组件未正确加载'
+            };
+        }
+        return await voiceFileSender.runOnlineSourceAction(request);
+    });
     ipcMain.handle(CHANNEL_REPEAT_MESSAGE, async (event, payload) => {
         const browserWindow = BrowserWindow.fromWebContents(event.sender);
         if (!browserWindow) {

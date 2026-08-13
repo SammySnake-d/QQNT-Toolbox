@@ -19,29 +19,83 @@ const {
 } = require('./voice/renderer-ui');
 const {
     TARGET_SILK_SAMPLE_RATE,
+    createSilentSilk,
     decodeSilkToPcm,
+    detectMediaInputFormat,
     encodeMediaFileToSilk,
     estimateSilkDurationMs,
+    extractAudioTrackWithoutReencoding,
+    getMediaInputArgs,
+    isAudioMediaPath,
+    isQqNativePttFile,
+    isVideoMediaPath,
     isSilkFile,
     makePcm16Wav,
+    probeAudioStream,
     runTool
 } = require('./voice/media');
 const {
     createPttSourceResolver,
     sanitizePttInfo
 } = require('./voice/ptt-source');
+const {
+    createOnlineSourceRunner,
+    downloadAudioUrl,
+    importOnlineSourceScript
+} = require('./voice/online-source');
 const { getTencentFilesRoots } = require('./qq-data-root');
 
 const PLUGIN_SLUG = 'qqnt_toolbox';
 const PLUGIN_NAME = 'QQNT Toolbox';
 const VOICE_DATA_DIR_NAME = 'voice';
-const AUDIO_FILE_EXTENSIONS = ['aac', 'amr', 'flac', 'm4a', 'mp3', 'ogg', 'opus', 'silk', 'slk', 'wav', 'weba', 'webm'];
+const AUDIO_FILE_EXTENSIONS = [
+    'aac', 'ac3', 'amr', 'audio', 'eac3', 'flac', 'm4a', 'mp3', 'oga', 'ogg',
+    'opus', 'silk', 'slk', 'wav', 'weba', 'webm', 'wv'
+];
 const VIDEO_FILE_EXTENSIONS = ['3g2', '3gp', 'asf', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'ogv', 'ts', 'webm', 'wmv'];
 const MEDIA_FILE_EXTENSIONS = uniqueStrings([...AUDIO_FILE_EXTENSIONS, ...VIDEO_FILE_EXTENSIONS]);
 const MEDIA_EXTENSION_SET = new Set(MEDIA_FILE_EXTENSIONS.map(extension => `.${extension}`));
+const DIRECT_PREVIEW_FORMATS_BY_EXTENSION = new Map([
+    ['.aac', 'aac'],
+    ['.flac', 'flac'],
+    ['.m4a', 'mov'],
+    ['.m4v', 'mov'],
+    ['.mov', 'mov'],
+    ['.mp3', 'mp3'],
+    ['.mp4', 'mov'],
+    ['.oga', 'ogg'],
+    ['.ogg', 'ogg'],
+    ['.opus', 'ogg'],
+    ['.wav', 'wav'],
+    ['.weba', 'webm'],
+    ['.webm', 'webm']
+]);
+const DIRECT_PREVIEW_DETECTED_FORMATS = new Set(['aac', 'flac', 'mov', 'mp3', 'ogg', 'wav']);
+const DIRECT_PREVIEW_EXTENSIONS_BY_FORMAT = Object.freeze({
+    aac: '.aac',
+    flac: '.flac',
+    mov: '.m4a',
+    mp3: '.mp3',
+    ogg: '.ogg',
+    wav: '.wav',
+    webm: '.webm'
+});
+const VOICE_UI_ROUTE_MARKERS = ['#/main/message', '#/chat', '#/forward', '#/record'];
+const VOICE_SEND_MODE_VALUES = new Set(['convert', 'original']);
+const DEFAULT_RAW_WAVE_AMPLITUDES = [0, 18, 9, 23, 16, 17, 16, 15, 44, 17, 24, 20, 14, 15, 17];
+const MUSICFREE_MANIFEST_MAX_PLUGINS = 32;
+const MUSICFREE_MANIFEST_MAX_BYTES = 512 * 1024;
+const MUSICFREE_MODULE_MAX_BYTES = 512 * 1024;
+const ONLINE_CATALOG_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
+const ONLINE_AUDIO_MAX_ATTEMPTS = 3;
+const BUILTIN_ONLINE_SEARCH_PROVIDERS = new Set(['kw', 'mg', 'kg', 'tx', 'wy']);
+const BUILTIN_ONLINE_RECOMMEND_PROVIDERS = new Set(['kw', 'mg', 'kg', 'tx', 'wy']);
 let voiceFeatureEnabled = false;
+let voiceKeepPlayingAcrossChats = false;
 let voiceSaveInContextMenuEnabled = false;
 let voiceForwardInContextMenuEnabled = false;
+let voiceNetworkFetch = null;
+let voiceMediaUrlResolver = null;
 let fakeVoiceDurationSeconds = 0;
 let diagnosticRecorder = null;
 let voiceTempCleanupStarted = false;
@@ -65,7 +119,8 @@ function getVoiceActionSummary(action) {
     return {
         actionType: String(action?.type || 'unknown'),
         itemCount: Array.isArray(action?.paths) ? action.paths.length : 0,
-        hasPeer: Boolean(action?.peer)
+        hasPeer: Boolean(action?.peer),
+        sendMode: normalizeVoiceSendMode(action?.sendMode)
     };
 }
 
@@ -111,6 +166,10 @@ function getLibraryIndexPath() {
     return path.join(getLibraryDir(), 'library.json');
 }
 
+function getOnlineSourceDir() {
+    return path.join(getPluginDataDir(), 'sources');
+}
+
 function withLibraryIndexMutation(work) {
     const next = libraryIndexMutationTail.then(work, work);
     libraryIndexMutationTail = next.catch(() => {});
@@ -144,17 +203,28 @@ async function cleanupOldVoiceTempFiles() {
         return;
     }
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    await Promise.all(entries
-        .filter(entry => entry.isFile() && entry.name.endsWith('.silk'))
-        .map(async entry => {
-            const filePath = path.join(tempDir, entry.name);
-            try {
-                if ((await fs.stat(filePath)).mtimeMs < cutoff) {
-                    await fs.unlink(filePath);
+    const temporaryExtensions = new Set([...MEDIA_EXTENSION_SET, '.silk', '.mka', '.ac3', '.eac3', '.wv']);
+    const cleanupFiles = async(directory, directoryEntries, extensions) => {
+        await Promise.all(directoryEntries
+            .filter(entry => entry.isFile() && extensions.has(path.extname(entry.name).toLowerCase()))
+            .map(async entry => {
+                const filePath = path.join(directory, entry.name);
+                try {
+                    if ((await fs.stat(filePath)).mtimeMs < cutoff) {
+                        await fs.unlink(filePath);
+                    }
+                } catch {
                 }
-            } catch {
-            }
-        }));
+            }));
+    };
+    await cleanupFiles(tempDir, entries, temporaryExtensions);
+    const previewDir = path.join(tempDir, 'preview');
+    let previewEntries = [];
+    try {
+        previewEntries = await fs.readdir(previewDir, { withFileTypes: true });
+    } catch {
+    }
+    await cleanupFiles(previewDir, previewEntries, temporaryExtensions);
 }
 
 async function getPreviewCacheDir() {
@@ -163,8 +233,70 @@ async function getPreviewCacheDir() {
     return previewDir;
 }
 
+async function getStableAudioPreviewPath(cacheKey, extension = '.wav') {
+    const previewDir = await getPreviewCacheDir();
+    const previewId = getBufferMd5(Buffer.from(`stable-preview|${String(cacheKey || '')}`));
+    const safeExtension = /^\.[a-z0-9]{1,8}$/i.test(String(extension || ''))
+        ? String(extension).toLowerCase()
+        : '.wav';
+    return path.join(previewDir, `${previewId}${safeExtension}`);
+}
+
+async function getExistingStableAudioPreview(cacheKey) {
+    const extensions = uniqueStrings(['.wav', ...DIRECT_PREVIEW_FORMATS_BY_EXTENSION.keys()]);
+    for (const extension of extensions) {
+        const previewPath = await getStableAudioPreviewPath(cacheKey, extension);
+        try {
+            const stat = await fs.stat(previewPath);
+            if (!stat.isFile() || stat.size <= 44) {
+                throw new Error('The cached preview is incomplete.');
+            }
+            const now = new Date();
+            await fs.utimes(previewPath, now, now).catch(() => {});
+            return previewPath;
+        } catch {
+            await fs.unlink(previewPath).catch(() => {});
+        }
+    }
+    return '';
+}
+
+function getDirectPreviewFormat(filePath) {
+    if (!filePath || isQqNativePttFile(filePath)) {
+        return '';
+    }
+    const detectedFormat = detectMediaInputFormat(filePath);
+    if (DIRECT_PREVIEW_DETECTED_FORMATS.has(detectedFormat)) {
+        return detectedFormat;
+    }
+    const extension = path.extname(String(filePath)).toLowerCase();
+    if (detectedFormat === 'matroska' && !['.weba', '.webm'].includes(extension)) {
+        return '';
+    }
+    return DIRECT_PREVIEW_FORMATS_BY_EXTENSION.get(extension) || '';
+}
+
+async function movePreviewFile(sourcePath, targetPath) {
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    try {
+        await fs.rename(sourcePath, targetPath);
+    } catch (error) {
+        if (!['EXDEV', 'EACCES', 'EPERM'].includes(error?.code)) {
+            throw error;
+        }
+        await fs.copyFile(sourcePath, targetPath);
+        await fs.unlink(sourcePath).catch(() => {});
+    }
+}
+
 function uniqueStrings(values) {
     return Array.from(new Set(values.filter(Boolean)));
+}
+
+function normalizeVoiceSendMode(value) {
+    return VOICE_SEND_MODE_VALUES.has(String(value || '').toLowerCase())
+        ? String(value).toLowerCase()
+        : 'convert';
 }
 
 function getDirectoryMtimeMs(dirPath) {
@@ -546,6 +678,1164 @@ async function writeLibraryIndex(index) {
     }
 }
 
+async function listOnlineSources() {
+    const directory = getOnlineSourceDir();
+    await fs.mkdir(directory, { recursive: true });
+    let entries = [];
+    try {
+        entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch {
+        return [];
+    }
+    const sources = [];
+    for (const entry of entries.filter(item => item.isFile() && item.name.endsWith('.json'))) {
+        try {
+            const metadata = JSON.parse(await fs.readFile(path.join(directory, entry.name), 'utf8'));
+            if (!metadata?.id) {
+                continue;
+            }
+            const declaredSources = metadata.sources && typeof metadata.sources === 'object' ? metadata.sources : {};
+            const projectedSources = Object.fromEntries(Object.entries(declaredSources).map(([providerId, info]) => {
+                const actions = Array.isArray(info?.actions) ? info.actions.slice() : [];
+                if (actions.includes('musicUrl') && BUILTIN_ONLINE_SEARCH_PROVIDERS.has(providerId) &&
+                    !actions.includes('search') && !actions.includes('musicSearch')) {
+                    actions.push('search');
+                }
+                return [providerId, { ...info, actions }];
+            }));
+            sources.push({
+                id: String(metadata.id),
+                name: String(metadata.name || metadata.id),
+                description: String(metadata.description || ''),
+                author: String(metadata.author || ''),
+                version: String(metadata.version || ''),
+                format: String(metadata.format || 'lxmusic'),
+                sourceUrl: String(metadata.sourceUrl || ''),
+                sources: projectedSources,
+            });
+        } catch {
+        }
+    }
+    return sources.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+}
+
+function getOnlineSourceId(value) {
+    const id = String(value || '').trim();
+    return /^[a-zA-Z0-9_-]{1,64}$/.test(id) ? id : '';
+}
+
+async function getOnlineSourceById(sourceId) {
+    const id = getOnlineSourceId(sourceId);
+    if (!id) {
+        throw new Error('在线音源标识无效。');
+    }
+    const directory = getOnlineSourceDir();
+    const sourcePath = path.join(directory, `${id}.js`);
+    const metadataPath = path.join(directory, `${id}.json`);
+    const [source, metadata] = await Promise.all([
+        fs.readFile(sourcePath, 'utf8'),
+        fs.readFile(metadataPath, 'utf8').then(value => JSON.parse(value))
+    ]);
+    return { source, metadata };
+}
+
+function getOnlineSourceFetch() {
+    return typeof voiceNetworkFetch === 'function'
+        ? voiceNetworkFetch
+        : (typeof fetch === 'function' ? fetch : null);
+}
+
+async function importOnlineSource(input, options = {}) {
+    const musicFreeManifest = await parseMusicFreeManifestInput(input);
+    if (musicFreeManifest) {
+        return await importMusicFreeManifest(musicFreeManifest, options);
+    }
+    const imported = await importOnlineSourceScript(input, {
+        rootPath: getOnlineSourceDir(),
+        id: options.id,
+        fetch: getOnlineSourceFetch()
+    });
+    return {
+        id: imported.id,
+        name: imported.metadata?.name || imported.id,
+        description: imported.metadata?.description || '',
+        author: imported.metadata?.author || '',
+        format: imported.format || imported.metadata?.format || 'lxmusic',
+        sources: imported.metadata?.sources || {}
+    };
+}
+
+function parseMusicFreeManifestText(value) {
+    const text = String(value || '').replace(/^\uFEFF/, '').trim();
+    if (!text || Buffer.byteLength(text, 'utf8') > MUSICFREE_MANIFEST_MAX_BYTES ||
+        (!text.startsWith('{') && !text.startsWith('['))) {
+        return null;
+    }
+    try {
+        const parsed = JSON.parse(text);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.plugins)) {
+            return null;
+        }
+        const plugins = parsed.plugins.map(item => ({
+            name: String(item?.name || '').trim(),
+            url: String(item?.url || '').trim(),
+            version: String(item?.version || '').trim()
+        })).filter(item => item.name && /^https?:\/\//i.test(item.url));
+        return plugins.length ? plugins.slice(0, MUSICFREE_MANIFEST_MAX_PLUGINS) : null;
+    } catch {
+        return null;
+    }
+}
+
+async function parseMusicFreeManifestInput(input) {
+    if (input && typeof input === 'object' && !Buffer.isBuffer(input)) {
+        if (typeof input.source === 'string') return parseMusicFreeManifestText(input.source);
+        if (input.url) return await parseMusicFreeManifestInput(String(input.url));
+        if (input.path) return await parseMusicFreeManifestInput(String(input.path));
+    }
+    const text = String(input ?? '').trim();
+    const inline = parseMusicFreeManifestText(text);
+    if (inline) return inline;
+    if (/^https?:\/\//i.test(text)) {
+        const fetcher = getOnlineSourceFetch();
+        if (typeof fetcher !== 'function') return null;
+        const response = await fetcher(text, { method: 'GET' });
+        if (!response?.ok && Number(response?.status) >= 400) {
+            throw Object.assign(new Error(`下载 MusicFree 清单失败（${response.status}）。`), { code: 'network-error' });
+        }
+        return parseMusicFreeManifestText(await response.text());
+    }
+    if (!text || text.includes('\n') || text.includes('\r') || /[;{}]/.test(text.slice(0, 256))) {
+        return null;
+    }
+    try {
+        return parseMusicFreeManifestText(await fs.readFile(path.resolve(text), 'utf8'));
+    } catch {
+        return null;
+    }
+}
+
+async function importMusicFreeManifest(plugins, options = {}) {
+    const fetcher = getOnlineSourceFetch();
+    if (typeof fetcher !== 'function') {
+        throw Object.assign(new Error('网络组件不可用，无法导入 MusicFree 音源。'), { code: 'network-error' });
+    }
+    const rootPath = getOnlineSourceDir();
+    const usedIds = new Set();
+    const imported = [];
+    const failed = [];
+    for (let index = 0; index < Math.min(plugins.length, MUSICFREE_MANIFEST_MAX_PLUGINS); index += 1) {
+        const plugin = plugins[index];
+        try {
+            const response = await fetcher(plugin.url, { method: 'GET' });
+            if (!response?.ok && Number(response?.status) >= 400) {
+                throw Object.assign(new Error(`下载失败（${response.status}）。`), { code: 'network-error' });
+            }
+            const source = await response.text();
+            if (Buffer.byteLength(source, 'utf8') > MUSICFREE_MODULE_MAX_BYTES) {
+                throw Object.assign(new Error('MusicFree 音源脚本过大。'), { code: 'script-too-large' });
+            }
+            const providerId = getMusicFreeManifestProviderId(plugin, index, usedIds);
+            const importedSource = await importOnlineSourceScript({ source, url: plugin.url }, {
+                rootPath,
+                id: `musicfree_${providerId}`,
+                name: plugin.name,
+                metadata: { name: plugin.name, version: plugin.version, providerId },
+                providerId,
+                format: 'musicfree',
+                fetch: fetcher
+            });
+            const sourceInfo = Object.values(importedSource.metadata?.sources || {})[0];
+            // MusicFree catalogues can include search-only discovery modules.
+            // Keep them imported so the result is visible and diagnosable, but
+            // the voice panel exposes only providers that also declare musicUrl.
+            imported.push({
+                id: importedSource.id,
+                name: importedSource.metadata?.name || plugin.name,
+                description: importedSource.metadata?.description || '',
+                author: importedSource.metadata?.author || '',
+                format: 'musicfree',
+                sources: importedSource.metadata?.sources || {}
+            });
+        } catch (error) {
+            failed.push({ name: plugin.name, reason: String(error?.message || error) });
+        }
+    }
+    if (!imported.length) {
+        const error = Object.assign(new Error(failed[0]?.reason || 'MusicFree 清单中没有可导入的音源。'), { code: 'musicfree-import-failed' });
+        error.details = { failed };
+        throw error;
+    }
+    return {
+        id: imported[0].id,
+        name: `MusicFree（${imported.length} 个音源）`,
+        format: 'musicfree-manifest',
+        imported,
+        failed,
+        sources: imported.flatMap(item => Object.entries(item.sources || {}).map(([providerId, info]) => [providerId, info]))
+    };
+}
+
+function getMusicFreeManifestProviderId(plugin, index, usedIds = new Set()) {
+    const fallback = `source_${index + 1}`;
+    let candidate = '';
+    try {
+        const pathname = new URL(String(plugin?.url || '')).pathname;
+        candidate = safeOnlineSourceId(path.basename(pathname, path.extname(pathname)));
+    } catch {
+        candidate = '';
+    }
+    candidate = candidate || safeOnlineSourceId(plugin?.name || fallback);
+    const base = candidate;
+    let suffix = 2;
+    while (usedIds.has(candidate)) {
+        candidate = `${base}_${suffix}`;
+        suffix += 1;
+    }
+    usedIds.add(candidate);
+    return candidate;
+}
+
+function safeOnlineSourceId(value) {
+    const normalized = String(value || '').trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+    return normalized.slice(0, 42) || 'source';
+}
+
+async function deleteOnlineSource(sourceId) {
+    const id = getOnlineSourceId(sourceId);
+    if (!id) {
+        throw Object.assign(new Error('在线音源标识无效。'), { code: 'invalid-source-id' });
+    }
+    const directory = getOnlineSourceDir();
+    const entries = await Promise.all([`${id}.js`, `${id}.json`].map(async name => {
+        const target = path.join(directory, name);
+        try {
+            await fs.lstat(target);
+            await fs.rm(target, { force: true });
+            return true;
+        } catch (error) {
+            if (error?.code === 'ENOENT') {
+                return false;
+            }
+            throw error;
+        }
+    }));
+    if (!entries.some(Boolean)) {
+        throw Object.assign(new Error('在线音源不存在或已被删除。'), { code: 'source-not-found' });
+    }
+    return { id };
+}
+
+function getOnlineSourceErrorMessage(error) {
+    const code = String(error?.code || '');
+    const messages = {
+        'catalog-unavailable': String(error?.message || '在线曲库目录不可用。'),
+        'invalid-script': '脚本内容无效。',
+        'invalid-source-id': '在线音源标识无效。',
+        'file-not-found': '找不到指定的本地脚本。',
+        'network-error': '下载音源脚本失败，请检查网络后重试。',
+        'response-too-large': '音源脚本过大。',
+        'script-too-large': '音源脚本过大。',
+        'unsafe-script': '脚本包含不允许的 API，无法导入。',
+        'source-not-found': '在线音源不存在或已被删除。',
+        'timeout': '音源脚本初始化超时。',
+        'unsupported-source-format': '不支持此音源格式。',
+        'unsupported-action': '当前音源不支持该操作。',
+        'unsupported-dependency': '此 MusicFree 音源需要当前不支持的依赖。',
+        'musicfree-import-failed': 'MusicFree 清单中的音源均未能导入。'
+    };
+    return messages[code] || String(error?.message || '在线音源操作失败。');
+}
+
+async function getOnlineSourceState() {
+    try {
+        return {
+            ok: true,
+            sources: await listOnlineSources()
+        };
+    } catch (error) {
+        recordDiagnostic('warn', 'voice.online-source-list-failed', { error });
+        return {
+            ok: false,
+            reason: String(error?.code || 'source-list-failed'),
+            message: getOnlineSourceErrorMessage(error),
+            sources: []
+        };
+    }
+}
+
+async function runOnlineSourceAction(request = {}) {
+    const type = String(request?.type || '').trim();
+    try {
+        if (type === 'import') {
+            const imported = await importOnlineSource(request.input, { id: request.id });
+            recordDiagnostic('info', 'voice.online-source-imported', { sourceId: imported.id });
+            return {
+                ok: true,
+                source: imported,
+                sources: await listOnlineSources()
+            };
+        }
+        if (type === 'delete') {
+            const removed = await deleteOnlineSource(request.id);
+            recordDiagnostic('info', 'voice.online-source-deleted', { sourceId: removed.id });
+            return {
+                ok: true,
+                removedId: removed.id,
+                sources: await listOnlineSources()
+            };
+        }
+        return {
+            ok: false,
+            reason: 'unsupported-action',
+            message: '不支持的在线音源操作。',
+            sources: await listOnlineSources()
+        };
+    } catch (error) {
+        recordDiagnostic('warn', 'voice.online-source-action-failed', { type, error });
+        return {
+            ok: false,
+            reason: String(error?.code || 'online-source-action-failed'),
+            message: getOnlineSourceErrorMessage(error),
+            sources: await listOnlineSources().catch(() => [])
+        };
+    }
+}
+
+/**
+ * Run the optional Toolbox search extension exposed by an imported LXMusic
+ * source. Standard User API scripts only resolve audio URLs, so Toolbox also
+ * provides a small catalogue layer for providers with stable public search.
+ */
+async function searchOnlineSource(options = {}) {
+    const keyword = String(options.keyword || options.query || '').trim();
+    if (!keyword && options.recommend !== true) {
+        throw new Error('搜索关键词不能为空');
+    }
+    const loaded = await getOnlineSourceById(options.sourceId);
+    const providerId = String(options.providerId || options.provider || '');
+    const providerInfo = loaded.metadata?.sources?.[providerId];
+    const declaredActions = Array.isArray(providerInfo?.actions) ? providerInfo.actions : [];
+    const sourceProvidesSearch = declaredActions.includes('search') || declaredActions.includes('musicSearch');
+    if (!sourceProvidesSearch && BUILTIN_ONLINE_SEARCH_PROVIDERS.has(providerId)) {
+        return await searchBuiltInOnlineCatalog({ ...options, keyword, providerId });
+    }
+    const runner = createOnlineSourceRunner(loaded.source, {
+        metadata: loaded.metadata,
+        format: loaded.metadata?.format,
+        fetch: getOnlineSourceFetch()
+    });
+    try {
+        if (typeof runner.requestMusicSearch !== 'function') {
+            throw Object.assign(new Error('当前音源不支持搜索。'), { code: 'unsupported-action' });
+        }
+        const result = await runner.requestMusicSearch(
+            keyword,
+            {
+                page: options.page,
+                limit: options.limit,
+                sourceId: providerId
+            }
+        );
+        const results = Array.isArray(result)
+            ? result
+            : (Array.isArray(result?.results) ? result.results : []);
+        return {
+            results,
+            sourceId: String(options.sourceId || ''),
+            providerId,
+            keyword,
+            page: Number(result?.page) || Math.max(1, Number(options.page) || 1),
+            hasMore: result?.hasMore === true
+        };
+    } finally {
+        runner.dispose();
+    }
+}
+
+async function readOnlineCatalogJson(url, headers = {}, requestOptions = {}) {
+    const fetcher = getOnlineSourceFetch();
+    if (typeof fetcher !== 'function') {
+        throw Object.assign(new Error('网络组件不可用。'), { code: 'network-error' });
+    }
+    const response = await fetcher(url, {
+        ...requestOptions,
+        method: requestOptions.method || 'GET',
+        headers: { ...headers, ...(requestOptions.headers || {}) }
+    });
+    if (!response?.ok && Number(response?.status) >= 400) {
+        throw Object.assign(new Error(`在线曲库请求失败（${response.status}）。`), { code: 'network-error' });
+    }
+    const declaredLength = Number(response?.headers?.get?.('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > ONLINE_CATALOG_RESPONSE_MAX_BYTES) {
+        throw Object.assign(new Error('在线曲库响应过大。'), { code: 'response-too-large' });
+    }
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > ONLINE_CATALOG_RESPONSE_MAX_BYTES) {
+        throw Object.assign(new Error('在线曲库响应过大。'), { code: 'response-too-large' });
+    }
+    return JSON.parse(text);
+}
+
+function mapTencentCatalogSong(item = {}) {
+    const songmid = String(item.mid || item.songmid || item.strMediaMid || '');
+    const name = String(item.name || item.title || item.songname || '').trim();
+    if (!songmid || !name) return null;
+    const singer = (Array.isArray(item.singer) ? item.singer : [])
+        .map(value => String(value?.name || value || '').trim()).filter(Boolean).join(', ');
+    const album = String(item.album?.name || item.albumname || '').trim();
+    const duration = Math.max(0, Number(item.interval) || 0);
+    const musicInfo = {
+        id: songmid,
+        songmid,
+        name,
+        songName: name,
+        singer,
+        album,
+        interval: duration,
+        duration,
+        source: 'tx'
+    };
+    return { title: name, name, singer, artist: singer, album, duration, musicInfo };
+}
+
+function mapNeteaseCatalogSong(item = {}) {
+    const id = String(item.id || '');
+    const name = String(item.name || '').trim();
+    if (!id || !name) return null;
+    const singer = (Array.isArray(item.artists) ? item.artists : [])
+        .map(value => String(value?.name || value || '').trim()).filter(Boolean).join(', ');
+    const album = String(item.album?.name || '').trim();
+    const duration = Math.max(0, Number(item.duration) || 0);
+    const musicInfo = {
+        id,
+        songmid: id,
+        name,
+        songName: name,
+        singer,
+        album,
+        duration,
+        source: 'wy'
+    };
+    return { title: name, name, singer, artist: singer, album, duration, musicInfo };
+}
+
+function mapKuwoCatalogSong(item = {}) {
+    const id = String(item.MUSICRID || item.musicrid || item.id || '').replace(/^MUSIC_/i, '').trim();
+    const name = String(item.NAME || item.SONGNAME || item.name || '').trim();
+    if (!id || !name) return null;
+    const singer = String(item.ARTIST || item.artist || '').trim();
+    const album = String(item.ALBUM || item.album || '').trim();
+    const duration = Math.max(0, Number(item.DURATION || item.duration) || 0);
+    const musicInfo = {
+        id,
+        songmid: id,
+        name,
+        songName: name,
+        singer,
+        artist: singer,
+        album,
+        albumName: album,
+        albumId: String(item.ALBUMID || item.albumId || ''),
+        interval: duration,
+        duration,
+        source: 'kw'
+    };
+    return { title: name, name, singer, artist: singer, album, duration, musicInfo };
+}
+
+function mapKugouCatalogSong(item = {}) {
+    const fallback = Array.isArray(item.Grp) ? item.Grp.find(value => value?.FileHash) : null;
+    const hash = String(item.FileHash || item.hash || fallback?.FileHash || '').trim();
+    const name = String(item.SongName || item.OriSongName || item.songname || item.name || '').trim();
+    if (!hash || !name) return null;
+    const singer = String(item.SingerName || item.singername || '').trim() ||
+        (Array.isArray(item.Singers) ? item.Singers.map(value => value?.name).filter(Boolean).join(', ') : '');
+    const album = String(item.AlbumName || item.album_name || '').trim();
+    const duration = Math.max(0, Number(item.Duration || item.duration) || 0);
+    const audioId = String(item.Audioid || item.MixSongID || item.ID || '').trim();
+    const musicInfo = {
+        id: hash,
+        hash,
+        songmid: audioId || hash,
+        audioId,
+        name,
+        songName: name,
+        singer,
+        artist: singer,
+        album,
+        albumName: album,
+        albumId: String(item.AlbumID || item.album_id || ''),
+        interval: duration,
+        duration,
+        source: 'kg'
+    };
+    const qualityHashes = {
+        '128k': hash,
+        '320k': String(item.HQFileHash || item['320hash'] || '').trim(),
+        flac: String(item.SQFileHash || item.sqhash || '').trim(),
+        flac24bit: String(item.ResFileHash || item.hash_high || '').trim()
+    };
+    musicInfo.HQFileHash = qualityHashes['320k'];
+    musicInfo.SQFileHash = qualityHashes.flac;
+    musicInfo.ResFileHash = qualityHashes.flac24bit;
+    musicInfo['320hash'] = qualityHashes['320k'];
+    musicInfo.sqhash = qualityHashes.flac;
+    musicInfo._types = Object.fromEntries(Object.entries(qualityHashes)
+        .filter(([, value]) => value)
+        .map(([quality, value]) => [quality, { hash: value }]));
+    return { title: name, name, singer, artist: singer, album, duration, musicInfo };
+}
+
+function mapMiguCatalogSong(item = {}) {
+    const id = String(item.id || item.songId || item.contentId || item.copyrightId || '').trim();
+    const name = String(item.name || item.songName || '').trim();
+    if (!id || !name) return null;
+    const singer = (Array.isArray(item.singers) ? item.singers : (Array.isArray(item.singerList) ? item.singerList : []))
+        .map(value => String(value?.name || value?.singerName || value || '').trim()).filter(Boolean).join(', ');
+    const albumInfo = (Array.isArray(item.albums) ? item.albums[0] : null) || {};
+    const album = String(albumInfo.name || item.album || item.albumName || '').trim();
+    const duration = Math.max(0, Number(item.duration || item.interval) || 0);
+    const musicInfo = {
+        id,
+        hash: id,
+        songmid: id,
+        songId: String(item.songId || item.id || ''),
+        contentId: String(item.contentId || ''),
+        copyrightId: String(item.copyrightId || ''),
+        name,
+        songName: name,
+        singer,
+        artist: singer,
+        album,
+        albumName: album,
+        albumId: String(albumInfo.id || item.albumId || ''),
+        interval: duration,
+        duration,
+        source: 'mg'
+    };
+    return { title: name, name, singer, artist: singer, album, duration, musicInfo };
+}
+
+async function searchBuiltInOnlineCatalog(options = {}) {
+    const providerId = String(options.providerId || '');
+    const limit = Math.max(1, Math.min(50, Number(options.limit) || 30));
+    const page = Math.max(1, Number(options.page) || 1);
+    let results = [];
+    let hasMore = false;
+    if (providerId === 'kw') {
+        const keyword = options.recommend === true ? '热歌' : String(options.keyword || '');
+        const query = encodeURIComponent(keyword);
+        const url = `https://search.kuwo.cn/r.s?client=kt&all=${query}&pn=${page - 1}&rn=${limit}&uid=794762570&ver=kwplayer_ar_9.2.2.1&vipver=1&show_copyright_off=1&newver=1&ft=music&cluster=0&strategy=2012&encoding=utf8&rformat=json&vermerge=1&mobi=1&issubtitle=1`;
+        const payload = await readOnlineCatalogJson(url, { 'User-Agent': 'Mozilla/5.0' });
+        results = (Array.isArray(payload?.abslist) ? payload.abslist : [])
+            .map(mapKuwoCatalogSong)
+            .filter(Boolean);
+        hasMore = Number(payload?.TOTAL) > page * limit;
+    } else if (providerId === 'mg') {
+        const keyword = options.recommend === true ? '热歌' : String(options.keyword || '');
+        const query = encodeURIComponent(keyword);
+        const searchSwitch = encodeURIComponent(JSON.stringify({ song: 1 }));
+        const url = `https://c.musicapp.migu.cn/v1.0/content/search_all.do?text=${query}&pageNo=${page}&pageSize=${limit}&isCopyright=1&searchSwitch=${searchSwitch}`;
+        const payload = await readOnlineCatalogJson(url, { 'User-Agent': 'Mozilla/5.0' });
+        results = (Array.isArray(payload?.songResultData?.result) ? payload.songResultData.result : [])
+            .map(mapMiguCatalogSong)
+            .filter(Boolean);
+        hasMore = Number(payload?.songResultData?.totalCount) > page * limit;
+    } else if (providerId === 'kg') {
+        const keyword = options.recommend === true ? '热歌' : String(options.keyword || '');
+        const query = encodeURIComponent(keyword);
+        const url = `https://songsearch.kugou.com/song_search_v2?keyword=${query}&page=${page}&pagesize=${limit}&userid=0&clientver=&platform=WebFilter&filter=2&iscorrection=1&privilege_filter=0&area_code=1`;
+        const payload = await readOnlineCatalogJson(url, {
+            Referer: 'https://www.kugou.com/',
+            'User-Agent': 'Mozilla/5.0'
+        });
+        results = (Array.isArray(payload?.data?.lists) ? payload.data.lists : [])
+            .map(mapKugouCatalogSong)
+            .filter(Boolean);
+        hasMore = Number(payload?.data?.total) > page * limit;
+    } else if (providerId === 'tx') {
+        if (options.recommend === true) {
+            const url = `https://c.y.qq.com/v8/fcg-bin/fcg_v8_toplist_cp.fcg?topid=26&page=detail&type=top&song_num=${limit}&format=json`;
+            const payload = await readOnlineCatalogJson(url, {
+                Referer: 'https://y.qq.com/',
+                'User-Agent': 'Mozilla/5.0'
+            });
+            results = (Array.isArray(payload?.songlist) ? payload.songlist : [])
+                .map(value => mapTencentCatalogSong(value?.data || value))
+                .filter(Boolean);
+        } else {
+            const query = encodeURIComponent(String(options.keyword || ''));
+            const url = `https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=${page}&n=${limit}&w=${query}&format=json&new_json=1`;
+            const payload = await readOnlineCatalogJson(url, {
+                Referer: 'https://y.qq.com/',
+                'User-Agent': 'Mozilla/5.0'
+            });
+            results = (Array.isArray(payload?.data?.song?.list) ? payload.data.song.list : [])
+                .map(mapTencentCatalogSong)
+                .filter(Boolean);
+            hasMore = Number(payload?.data?.song?.totalnum) > page * limit;
+        }
+    } else if (providerId === 'wy') {
+        if (options.recommend === true) {
+            const payload = await readOnlineCatalogJson('https://music.163.com/api/v3/playlist/detail?id=3778678&n=50', {
+                Referer: 'https://music.163.com/',
+                'User-Agent': 'Mozilla/5.0'
+            });
+            results = (Array.isArray(payload?.playlist?.tracks) ? payload.playlist.tracks : [])
+                .slice(0, limit)
+                .map(item => mapNeteaseCatalogSong({
+                    ...item,
+                    artists: item.ar,
+                    album: item.al,
+                    duration: item.dt
+                }))
+                .filter(Boolean);
+        } else {
+            const query = encodeURIComponent(String(options.keyword || ''));
+            const offset = (page - 1) * limit;
+            const url = `https://music.163.com/api/search/get/web?s=${query}&type=1&offset=${offset}&total=true&limit=${limit}`;
+            const payload = await readOnlineCatalogJson(url, {
+                Referer: 'https://music.163.com/',
+                'User-Agent': 'Mozilla/5.0'
+            });
+            results = (Array.isArray(payload?.result?.songs) ? payload.result.songs : [])
+                .map(mapNeteaseCatalogSong)
+                .filter(Boolean);
+            hasMore = Number(payload?.result?.songCount) > page * limit;
+        }
+    } else {
+        throw Object.assign(new Error('当前音源暂不支持搜索。'), { code: 'unsupported-action' });
+    }
+    return {
+        results,
+        sourceId: String(options.sourceId || ''),
+        providerId,
+        keyword: String(options.keyword || ''),
+        page,
+        hasMore
+    };
+}
+
+function normalizeOnlineCoverUrl(value) {
+    const url = String(value || '').trim();
+    if (!url) return '';
+    return url.replace(/^http:\/\//i, 'https://');
+}
+
+function formatOnlinePlayCount(value) {
+    const count = Math.max(0, Number(value) || 0);
+    if (count >= 100_000_000) return `${(count / 100_000_000).toFixed(count >= 1_000_000_000 ? 0 : 1)}亿次播放`;
+    if (count >= 10_000) return `${(count / 10_000).toFixed(count >= 100_000 ? 0 : 1)}万次播放`;
+    return count > 0 ? `${Math.floor(count)} 次播放` : '';
+}
+
+function getTencentPlaylistCatalogUrl(sort, page, limit) {
+    const request = {
+        comm: { cv: 1602, ct: 20 },
+        playlist: {
+            method: 'get_playlist_by_tag',
+            param: {
+                id: 10000000,
+                sin: limit * (page - 1),
+                size: limit,
+                order: sort === 'new' ? 2 : 5,
+                cur_page: page
+            },
+            module: 'playlist.PlayListPlazaServer'
+        }
+    };
+    return `https://u.y.qq.com/cgi-bin/musicu.fcg?loginUin=0&hostUin=0&format=json&inCharset=utf-8&outCharset=utf-8&notice=0&platform=wk_v15.json&needNewCode=0&data=${encodeURIComponent(JSON.stringify(request))}`;
+}
+
+async function listBuiltInOnlineCollections(options = {}) {
+    const providerId = String(options.providerId || '');
+    const mode = options.mode === 'playlists' ? 'playlists' : 'charts';
+    const sort = options.sort === 'new' ? 'new' : 'hot';
+    const page = Math.max(1, Math.floor(Number(options.page) || 1));
+    const limit = Math.max(1, Math.min(30, Math.floor(Number(options.limit) || 20)));
+    let items = [];
+    let total = 0;
+    if (mode === 'charts' && providerId === 'tx') {
+        const payload = await readOnlineCatalogJson(
+            'https://c.y.qq.com/v8/fcg-bin/fcg_myqq_toplist.fcg?format=json&g_tk=5381&uin=0&inCharset=utf-8&outCharset=utf-8&notice=0&platform=h5&needNewCode=1',
+            { Referer: 'https://y.qq.com/', 'User-Agent': 'Mozilla/5.0' }
+        );
+        const list = Array.isArray(payload?.data?.topList) ? payload.data.topList : [];
+        items = list.filter(item => Number(item?.id) !== 201).slice(0, limit).map(item => ({
+            id: `tx-chart-${item.id}`,
+            collectionId: String(item.id || ''),
+            collectionKind: 'chart',
+            title: String(item.topTitle || '').replace(/^巅峰榜·/, '') || '排行榜',
+            subtitle: formatOnlinePlayCount(item.listenCount) || 'QQ 音乐',
+            coverUrl: normalizeOnlineCoverUrl(item.picUrl),
+            providerId: 'tx'
+        })).filter(item => item.collectionId);
+        total = list.length;
+    } else if (mode === 'charts' && providerId === 'wy') {
+        const payload = await readOnlineCatalogJson('https://music.163.com/api/toplist', {
+            Referer: 'https://music.163.com/',
+            'User-Agent': 'Mozilla/5.0'
+        });
+        const list = Array.isArray(payload?.list) ? payload.list : [];
+        items = list.slice(0, limit).map(item => ({
+            id: `wy-chart-${item.id}`,
+            collectionId: String(item.id || ''),
+            collectionKind: 'chart',
+            title: String(item.name || '').trim() || '排行榜',
+            subtitle: [String(item.updateFrequency || '').trim(), '网易云音乐'].filter(Boolean).join(' · '),
+            coverUrl: normalizeOnlineCoverUrl(item.coverImgUrl),
+            providerId: 'wy'
+        })).filter(item => item.collectionId);
+        total = list.length;
+    } else if (mode === 'playlists' && providerId === 'tx') {
+        const payload = await readOnlineCatalogJson(getTencentPlaylistCatalogUrl(sort, page, limit), {
+            Referer: 'https://y.qq.com/',
+            'User-Agent': 'Mozilla/5.0'
+        });
+        const data = payload?.playlist?.data || {};
+        const list = Array.isArray(data.v_playlist) ? data.v_playlist : [];
+        items = list.map(item => {
+            const songIds = String(item.song_ids || '').split(/\s+/).filter(value => /^\d+$/.test(value)).slice(0, 60);
+            return {
+                id: `tx-playlist-${item.tid}`,
+                collectionId: String(item.tid || ''),
+                collectionKind: 'playlist',
+                title: String(item.title || '').trim() || '歌单',
+                subtitle: [String(item.creator_info?.nick || '').trim(), formatOnlinePlayCount(item.access_num)].filter(Boolean).join(' · '),
+                coverUrl: normalizeOnlineCoverUrl(item.cover_url_medium || item.cover_url_big),
+                songIds,
+                total: songIds.length,
+                providerId: 'tx'
+            };
+        }).filter(item => item.collectionId && item.songIds.length);
+        total = Math.max(items.length, Number(data.total) || 0);
+    } else if (mode === 'playlists' && providerId === 'wy') {
+        if (sort === 'new') return { items: [], total: 0, page, hasMore: false };
+        const offset = (page - 1) * limit;
+        const payload = await readOnlineCatalogJson(
+            `https://music.163.com/api/playlist/list?cat=${encodeURIComponent('全部')}&order=hot&offset=${offset}&total=true&limit=${limit}`,
+            { Referer: 'https://music.163.com/', 'User-Agent': 'Mozilla/5.0' }
+        );
+        const list = Array.isArray(payload?.playlists) ? payload.playlists : [];
+        items = list.map(item => ({
+            id: `wy-playlist-${item.id}`,
+            collectionId: String(item.id || ''),
+            collectionKind: 'playlist',
+            title: String(item.name || '').trim() || '歌单',
+            subtitle: [String(item.creator?.nickname || '').trim(), formatOnlinePlayCount(item.playCount)].filter(Boolean).join(' · '),
+            coverUrl: normalizeOnlineCoverUrl(item.coverImgUrl),
+            total: Math.max(0, Number(item.trackCount) || 0),
+            providerId: 'wy'
+        })).filter(item => item.collectionId);
+        total = Math.max(items.length, Number(payload?.total) || 0);
+    } else {
+        throw Object.assign(new Error('当前平台暂不支持该在线目录。'), { code: 'unsupported-action' });
+    }
+    return { items, total, page, hasMore: total > page * limit };
+}
+
+async function getTencentPlaylistSongs(songIds, limit) {
+    const ids = (Array.isArray(songIds) ? songIds : [])
+        .map(value => String(value || ''))
+        .filter(value => /^\d+$/.test(value))
+        .slice(0, limit);
+    if (!ids.length) return [];
+    const body = {
+        comm: { ct: '19', cv: '1859', uin: '0' }
+    };
+    ids.forEach((songId, index) => {
+        body[`req_${index}`] = {
+            module: 'music.pf_song_detail_svr',
+            method: 'get_song_detail_yqq',
+            param: { song_type: 0, song_id: Number(songId) }
+        };
+    });
+    const payload = await readOnlineCatalogJson('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+        Referer: 'https://y.qq.com/',
+        'User-Agent': 'Mozilla/5.0'
+    }, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    return ids.map((unused, index) => mapTencentCatalogSong(payload?.[`req_${index}`]?.data?.track_info || {})).filter(Boolean);
+}
+
+async function getBuiltInOnlineCollectionSongs(options = {}) {
+    const providerId = String(options.providerId || '');
+    const collectionKind = options.collectionKind === 'playlist' ? 'playlist' : 'chart';
+    const collectionId = String(options.collectionId || '').trim();
+    const limit = Math.max(1, Math.min(60, Math.floor(Number(options.limit) || 50)));
+    if (!collectionId) throw Object.assign(new Error('在线目录标识无效。'), { code: 'invalid-result' });
+    let results = [];
+    let info = {};
+    if (providerId === 'tx' && collectionKind === 'chart') {
+        const payload = await readOnlineCatalogJson(
+            `https://c.y.qq.com/v8/fcg-bin/fcg_v8_toplist_cp.fcg?topid=${encodeURIComponent(collectionId)}&page=detail&type=top&song_num=${limit}&format=json`,
+            { Referer: 'https://y.qq.com/', 'User-Agent': 'Mozilla/5.0' }
+        );
+        results = (Array.isArray(payload?.songlist) ? payload.songlist : [])
+            .map(value => mapTencentCatalogSong(value?.data || value)).filter(Boolean);
+        info = {
+            title: String(payload?.topinfo?.ListName || options.title || '排行榜'),
+            coverUrl: normalizeOnlineCoverUrl(payload?.topinfo?.pic_v12 || options.coverUrl)
+        };
+    } else if (providerId === 'tx' && collectionKind === 'playlist') {
+        results = await getTencentPlaylistSongs(options.songIds, limit);
+        info = { title: String(options.title || '歌单'), coverUrl: normalizeOnlineCoverUrl(options.coverUrl) };
+    } else if (providerId === 'wy') {
+        const payload = await readOnlineCatalogJson(
+            `https://music.163.com/api/v3/playlist/detail?id=${encodeURIComponent(collectionId)}&n=${limit}&s=8`,
+            { Referer: 'https://music.163.com/', 'User-Agent': 'Mozilla/5.0' }
+        );
+        const playlist = payload?.playlist || {};
+        let tracks = Array.isArray(playlist.tracks) ? playlist.tracks.slice(0, limit) : [];
+        const trackIds = (Array.isArray(playlist.trackIds) ? playlist.trackIds : [])
+            .map(item => String(item?.id || '')).filter(Boolean).slice(0, limit);
+        if (trackIds.length > tracks.length) {
+            const detail = await readOnlineCatalogJson(
+                `https://music.163.com/api/song/detail?ids=${encodeURIComponent(JSON.stringify(trackIds))}`,
+                { Referer: 'https://music.163.com/', 'User-Agent': 'Mozilla/5.0' }
+            );
+            if (Array.isArray(detail?.songs) && detail.songs.length) tracks = detail.songs;
+        }
+        results = tracks.map(item => mapNeteaseCatalogSong({
+            ...item,
+            artists: item.ar || item.artists,
+            album: item.al || item.album,
+            duration: item.dt || item.duration
+        })).filter(Boolean);
+        info = {
+            title: String(playlist.name || options.title || (collectionKind === 'chart' ? '排行榜' : '歌单')),
+            subtitle: String(playlist.creator?.nickname || ''),
+            coverUrl: normalizeOnlineCoverUrl(playlist.coverImgUrl || options.coverUrl)
+        };
+    } else {
+        throw Object.assign(new Error('当前平台暂不支持该在线目录。'), { code: 'unsupported-action' });
+    }
+    return { results, info };
+}
+
+async function browseOnlineCatalog(options = {}) {
+    const mode = ['recommend', 'charts', 'playlists', 'detail'].includes(options.mode)
+        ? options.mode
+        : 'recommend';
+    const sort = options.sort === 'new' ? 'new' : 'hot';
+    const targets = (Array.isArray(options.targets) ? options.targets : [])
+        .filter(target => ['tx', 'wy'].includes(String(target?.providerId || '')))
+        .slice(0, mode === 'detail' ? 1 : 4);
+    const settled = await Promise.allSettled(targets.map(async target => {
+        const sourceId = String(target?.sourceId || '');
+        const providerId = String(target?.providerId || '');
+        const loaded = await getOnlineSourceById(sourceId);
+        if (!loaded.metadata?.sources?.[providerId]?.actions?.includes('musicUrl')) {
+            throw Object.assign(new Error('当前音源无法解析该平台歌曲。'), { code: 'unsupported-action' });
+        }
+        if (mode === 'detail') {
+            const detail = await getBuiltInOnlineCollectionSongs({
+                ...options.collection,
+                providerId,
+                limit: options.limit
+            });
+            return {
+                items: detail.results.map(item => ({
+                    ...item,
+                    toolboxSourceId: sourceId,
+                    toolboxProviderId: providerId,
+                    toolboxSourceLabel: String(target?.label || '')
+                })),
+                info: detail.info
+            };
+        }
+        if (mode === 'recommend') {
+            const presets = providerId === 'tx'
+                ? { hot: ['26', 'QQ 音乐热歌榜'], new: ['27', 'QQ 音乐新歌榜'] }
+                : { hot: ['3778678', '网易云热歌榜'], new: ['3779629', '网易云新歌榜'] };
+            const [collectionId, title] = presets[sort];
+            const detail = await getBuiltInOnlineCollectionSongs({
+                providerId,
+                collectionKind: 'chart',
+                collectionId,
+                title,
+                limit: options.limit
+            });
+            return {
+                items: detail.results.map(item => ({
+                    ...item,
+                    toolboxSourceId: sourceId,
+                    toolboxProviderId: providerId,
+                    toolboxSourceLabel: String(target?.label || '')
+                })),
+                info: { title: sort === 'new' ? '最新音乐' : '热门音乐' }
+            };
+        }
+        const listed = await listBuiltInOnlineCollections({
+            providerId,
+            mode,
+            sort,
+            page: options.page,
+            limit: options.limit
+        });
+        return {
+            items: listed.items.map(item => ({
+                ...item,
+                sourceId,
+                providerId,
+                sourceLabel: String(target?.label || '')
+            })),
+            total: listed.total,
+            hasMore: listed.hasMore
+        };
+    }));
+    const items = [];
+    const failures = [];
+    let info = {};
+    let hasMore = false;
+    settled.forEach((result, index) => {
+        const target = targets[index];
+        if (result.status === 'fulfilled') {
+            items.push(...result.value.items);
+            if (!info.title && result.value.info) info = result.value.info;
+            hasMore ||= result.value.hasMore === true;
+        } else {
+            failures.push({
+                sourceId: String(target?.sourceId || ''),
+                providerId: String(target?.providerId || ''),
+                message: String(result.reason?.message || '在线目录加载失败')
+            });
+        }
+    });
+    return { items, failures, info, mode, sort, hasMore };
+}
+
+async function searchOnlineSources(options = {}) {
+    const targets = (Array.isArray(options.targets) ? options.targets : [])
+        .filter(target => options.recommend !== true ||
+            BUILTIN_ONLINE_RECOMMEND_PROVIDERS.has(String(target?.providerId || '')) ||
+            !BUILTIN_ONLINE_SEARCH_PROVIDERS.has(String(target?.providerId || '')))
+        .slice(0, 24);
+    const perSourceLimit = Math.max(1, Math.min(30, Number(options.limit) || 20));
+    const settled = await Promise.allSettled(targets.map(async target => {
+        const result = await searchOnlineSource({
+            sourceId: target?.sourceId,
+            providerId: target?.providerId,
+            keyword: options.keyword,
+            recommend: options.recommend === true,
+            page: options.page,
+            limit: perSourceLimit
+        });
+        return result.results.map(item => ({
+            ...item,
+            toolboxSourceId: result.sourceId,
+            toolboxProviderId: result.providerId,
+            toolboxSourceLabel: String(target?.label || ''),
+            toolboxQuality: String(options.quality || '320k')
+        }));
+    }));
+    const results = settled.flatMap(entry => entry.status === 'fulfilled' ? entry.value : []);
+    const failures = settled.flatMap((entry, index) => entry.status === 'rejected'
+        ? [{
+            sourceId: String(targets[index]?.sourceId || ''),
+            providerId: String(targets[index]?.providerId || ''),
+            message: getOnlineSourceErrorMessage(entry.reason)
+        }]
+        : []);
+    if (!results.length && failures.length === targets.length && failures.length) {
+        throw new Error(failures[0].message);
+    }
+    return { results, failures };
+}
+
+// QQ has returned this cache path through several layers of wrappers across
+// desktop releases (for example `data.path_info.path`). Keep the extraction
+// recursive so the raw-send path is independent of the response envelope.
+function findNativePath(value, depth = 0, seen = new WeakSet()) {
+    if (!value || depth > 8 || typeof value !== 'object' || value instanceof Uint8Array || value instanceof Map) {
+        return '';
+    }
+    if (seen.has(value)) {
+        return '';
+    }
+    seen.add(value);
+    const pathKeys = ['path', 'filePath', 'newPath', 'file_path', 'localPath', 'path_info'];
+    for (const key of pathKeys) {
+        const candidate = value[key];
+        if (typeof candidate === 'string' && candidate.trim()) {
+            return candidate.trim();
+        }
+        if (candidate && typeof candidate === 'object') {
+            const nested = findNativePath(candidate, depth + 1, seen);
+            if (nested) {
+                return nested;
+            }
+        }
+    }
+    for (const item of Object.values(value)) {
+        const nested = findNativePath(item, depth + 1, seen);
+        if (nested) {
+            return nested;
+        }
+    }
+    return '';
+}
+
+function getOnlineAudioHttpStatus(error) {
+    const status = Number(error?.details?.status ?? error?.status ?? error?.statusCode ?? 0);
+    return Number.isFinite(status) ? Math.trunc(status) : 0;
+}
+
+function isRetryableOnlineAudioError(error) {
+    const status = getOnlineAudioHttpStatus(error);
+    if ([403, 408, 425, 429, 500, 502, 503, 504].includes(status)) {
+        return true;
+    }
+    return ['network-error', 'timeout'].includes(String(error?.code || ''));
+}
+
+function getOnlineAudioRequestHeaders(providerId = '') {
+    const origins = {
+        kw: 'https://www.kuwo.cn/',
+        mg: 'https://music.migu.cn/',
+        kg: 'https://www.kugou.com/',
+        tx: 'https://y.qq.com/',
+        wy: 'https://music.163.com/'
+    };
+    const referer = origins[String(providerId || '').trim().toLowerCase()] || '';
+    return {
+        Accept: 'audio/*,application/octet-stream;q=0.9,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
+        ...(referer ? { Referer: referer } : {})
+    };
+}
+
+async function createOnlineSourceAudioResolver(options = {}) {
+    const directUrl = String(options.url || '').trim();
+    if (directUrl) {
+        return {
+            resolve: async () => directUrl,
+            dispose() {}
+        };
+    }
+    const title = String(options.title || options.fileName || '').trim();
+    const loaded = await getOnlineSourceById(options.sourceId);
+    const runner = createOnlineSourceRunner(loaded.source, {
+        metadata: loaded.metadata,
+        format: loaded.metadata?.format,
+        fetch: getOnlineSourceFetch()
+    });
+    return {
+        resolve: async () => await runner.requestMusicUrl(
+            options.songInfo || { id: title, name: title },
+            options.quality || '320k',
+            options.providerId || options.provider || ''
+        ),
+        dispose: () => runner.dispose()
+    };
+}
+
+async function downloadOnlineSourceAudio(options = {}) {
+    const directUrl = String(options.url || '').trim();
+    const title = String(options.title || options.fileName || '').trim();
+    let lastError;
+    const resolver = await createOnlineSourceAudioResolver(options);
+    try {
+        for (let attempt = 1; attempt <= ONLINE_AUDIO_MAX_ATTEMPTS; attempt += 1) {
+            try {
+                const audioUrl = await resolver.resolve();
+                const temporaryName = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}-${title || 'online-audio'}`;
+                const cached = await downloadAudioUrl(audioUrl, {
+                    rootPath: getPluginTempDir(),
+                    fileName: temporaryName,
+                    fetch: getOnlineSourceFetch(),
+                    ...(attempt > 1
+                        ? { headers: getOnlineAudioRequestHeaders(options.providerId || options.provider) }
+                        : {})
+                });
+                return {
+                    ...cached,
+                    sourceUrl: audioUrl,
+                    title: title || path.basename(cached.fileName, path.extname(cached.fileName)),
+                    temporary: true
+                };
+            } catch (error) {
+                lastError = error;
+                if (attempt >= ONLINE_AUDIO_MAX_ATTEMPTS || !isRetryableOnlineAudioError(error)) {
+                    throw error;
+                }
+                recordDiagnostic('warn', 'voice.online-audio-retry', {
+                    attempt,
+                    maxAttempts: ONLINE_AUDIO_MAX_ATTEMPTS,
+                    phase: getOnlineAudioHttpStatus(error) ? 'http' : 'network',
+                    status: getOnlineAudioHttpStatus(error),
+                    providerId: String(options.providerId || options.provider || ''),
+                    refreshedUrl: !directUrl
+                });
+                await new Promise(resolve => setTimeout(resolve, attempt * 250));
+            }
+        }
+    } finally {
+        resolver.dispose();
+    }
+    throw lastError;
+}
+
+async function createOnlineAudioPreview(options = {}) {
+    const previewKey = JSON.stringify({
+        previewVersion: 2,
+        sourceId: String(options.sourceId || ''),
+        providerId: String(options.providerId || options.provider || ''),
+        quality: String(options.quality || '320k'),
+        songInfo: options.songInfo && typeof options.songInfo === 'object' ? options.songInfo : {},
+        url: String(options.url || '')
+    });
+    const existingPreviewPath = await getExistingStableAudioPreview(previewKey);
+    if (existingPreviewPath) {
+        return {
+            id: String(options.id || ''),
+            title: String(options.title || '').trim() || '在线音频',
+            previewPath: existingPreviewPath,
+            previewFormat: getDirectPreviewFormat(existingPreviewPath) || 'wav'
+        };
+    }
+    const cached = await downloadOnlineSourceAudio(options);
+    try {
+        const directFormat = getDirectPreviewFormat(cached.path);
+        const previewPath = await getStableAudioPreviewPath(
+            previewKey,
+            DIRECT_PREVIEW_EXTENSIONS_BY_FORMAT[directFormat] || '.wav'
+        );
+        if (directFormat) {
+            await movePreviewFile(cached.path, previewPath);
+        } else if (isSilkFile(cached.path)) {
+            const sourceData = await fs.readFile(cached.path);
+            const decoded = await decodeSilkToPcm(sourceData);
+            await fs.writeFile(previewPath, makePcm16Wav(decoded.data, TARGET_SILK_SAMPLE_RATE, 1));
+        } else {
+            await runTool('ffmpeg', [
+                '-v', 'error',
+                '-y',
+                ...getMediaInputArgs(cached.path),
+                '-vn',
+                '-ac', '2',
+                '-ar', '48000',
+                '-f', 'wav',
+                previewPath
+            ]);
+        }
+        return {
+            id: String(options.id || ''),
+            title: cached.title || String(options.title || '').trim() || '在线音频',
+            previewPath,
+            previewFormat: directFormat || 'wav'
+        };
+    } finally {
+        if (cached.temporary) {
+            await fs.unlink(cached.path).catch(() => {});
+        }
+    }
+}
+
 function createLibraryIndexLookup(index) {
     const itemsByPath = new Map();
     const convertedVoiceCandidates = new Map();
@@ -618,7 +1908,7 @@ async function probeMediaDurationSeconds(filePath) {
     try {
         const result = await runTool('ffmpeg', [
             '-hide_banner',
-            '-i', filePath,
+            ...getMediaInputArgs(filePath),
             '-t', '0.001',
             '-f', 'null',
             '-'
@@ -856,7 +2146,7 @@ async function createAudioPreviewFile(sourcePath, cacheKey = '') {
             await runTool('ffmpeg', [
                 '-v', 'error',
                 '-y',
-                '-i', sourcePath,
+                ...getMediaInputArgs(sourcePath),
                 '-vn',
                 '-ac', '2',
                 '-ar', '48000',
@@ -874,7 +2164,10 @@ async function createLibraryPreviewItem(itemId) {
         throw new Error(`Voice library item was not found: ${itemId}`);
     }
     const sourcePath = normalizeStoredPath(item.path);
-    const previewPath = await createAudioPreviewFile(sourcePath, item.id);
+    const directFormat = getDirectPreviewFormat(sourcePath);
+    const previewPath = directFormat
+        ? sourcePath
+        : await createAudioPreviewFile(sourcePath, item.id);
 
     return {
         id: item.id,
@@ -882,22 +2175,29 @@ async function createLibraryPreviewItem(itemId) {
         kind: item.kind || 'ptt',
         duration: Number(item.duration) || 0,
         createdAt: item.createdAt || '',
-        previewPath
+        previewPath,
+        previewFormat: directFormat || 'wav'
     };
 }
 
-async function createPttPreviewItem(ptt) {
-    const sourcePath = resolvePttSourcePath(ptt);
-    if (!sourcePath) {
-        throw new Error('The voice file was not found in QQNT cache.');
+async function waitForPttSourcePath(ptt, options = {}) {
+    const attempts = Math.max(1, Math.min(24, Math.trunc(Number(options.attempts)) || 1));
+    const intervalMs = Math.max(50, Math.min(1000, Math.trunc(Number(options.intervalMs)) || 250));
+    const expectedSize = Math.max(0, Math.trunc(Number(ptt?.fileSize) || 0));
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const sourcePath = resolvePttSourcePath(ptt);
+        const actualSize = sourcePath
+            ? Number(await fs.stat(sourcePath).then(stat => stat.size).catch(() => 0))
+            : 0;
+        if (sourcePath && actualSize > 0 && (!expectedSize || actualSize >= expectedSize)) {
+            return sourcePath;
+        }
+        if (attempt + 1 < attempts) {
+            await new Promise(resolve => setTimeout(resolve, intervalMs));
+            pttSourceResolver.invalidate();
+        }
     }
-    const fileName = normalizeFieldText(ptt?.fileName) || path.basename(sourcePath);
-    const cacheKey = normalizeFieldText(ptt?.md5HexStr) || normalizeFieldText(ptt?.fileUuid) || fileName;
-    return {
-        title: path.basename(fileName, path.extname(fileName)) || '语音',
-        duration: Number(ptt?.duration) || await detectLibraryDurationSeconds(sourcePath),
-        previewPath: await createAudioPreviewFile(sourcePath, cacheKey)
-    };
+    return '';
 }
 
 function getSilkDurationSeconds(silkResult) {
@@ -951,16 +2251,18 @@ async function addFileToLibrary(sourcePath, metadata = {}) {
     const sourceExt = path.extname(sourcePath).toLowerCase() || '.amr';
     const id = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
     const title = safeFileStem(metadata.title || path.basename(sourcePath, sourceExt));
-    const targetPath = await makeUniqueLibraryPath(path.join(getLibraryVoiceDir(), `${title}${sourceExt}`));
+    const targetDir = metadata.targetDir || getLibraryVoiceDir();
+    const targetPath = await makeUniqueLibraryPath(path.join(targetDir, `${title}${sourceExt}`));
     await fs.copyFile(sourcePath, targetPath);
 
     const item = {
         id,
-        kind: 'ptt',
+        kind: metadata.kind || (isSilkFile(sourcePath) ? 'ptt' : 'media'),
         title,
         path: targetPath,
         originalName: metadata.originalName || path.basename(sourcePath),
         sourcePath,
+        sourceMd5: metadata.sourceMd5 || '',
         md5,
         duration: Number(metadata.duration) || 0,
         createdAt: new Date().toISOString()
@@ -970,17 +2272,17 @@ async function addFileToLibrary(sourcePath, metadata = {}) {
     return item;
 }
 
-async function addMediaFileToLibrary(filePath, targetFolder = '') {
+async function addMediaFileToLibrary(filePath, targetFolder = '', metadata = {}) {
     if (!fsSync.existsSync(filePath)) {
         throw new Error(`File does not exist: ${filePath}`);
     }
     const sourceExt = path.extname(filePath).toLowerCase();
-    const title = safeFileStem(path.basename(filePath, sourceExt));
+    const title = safeFileStem(metadata.title || path.basename(filePath, sourceExt));
     const sourceMd5 = await getFileMd5(filePath);
     const index = await readLibraryIndex();
     const existing = index.items.find(item =>
         item.sourceMd5 === sourceMd5 &&
-        item.kind === 'ptt' &&
+        item.kind === 'media' &&
         fsSync.existsSync(normalizeStoredPath(item.path))
     );
     if (existing) {
@@ -991,14 +2293,15 @@ async function addMediaFileToLibrary(filePath, targetFolder = '') {
         allowRoot: true,
         kind: 'folder'
     });
-    const silkResult = await encodeMediaFileToSilk(filePath);
-    return await addVoiceDataToLibrary(silkResult.data, {
+    const duration = await detectLibraryDurationSeconds(filePath);
+    return await addFileToLibrary(filePath, {
         title,
-        originalName: path.basename(filePath),
-        sourcePath: filePath,
+        originalName: metadata.originalName || path.basename(filePath),
+        sourcePath: metadata.sourcePath ?? filePath,
         sourceMd5,
-        duration: getSilkDurationSeconds(silkResult),
-        targetDir: target.path
+        duration,
+        targetDir: target.path,
+        kind: 'media'
     });
 }
 
@@ -1451,7 +2754,10 @@ function getWindowState(browserWindow) {
     let state = windowStates.get(browserWindow);
     if (!state) {
         state = {
+            nativeRequestInstalled: false,
             uiLoopRunning: false,
+            uiSetupInstalled: false,
+            uiStartTimer: null,
             peerUidByUin: new Map()
         };
         windowStates.set(browserWindow, state);
@@ -1477,12 +2783,14 @@ async function setInjectedLibrary(browserWindow, folder = '', extraPayload = {})
         withLibraryIndexMutation(() => getLibraryItems(normalizedFolder, missingDurationItems)),
         getLibraryFolders()
     ]);
+    const onlineSources = await listOnlineSources().catch(() => []);
     const payload = {
         folder: normalizedFolder,
         parent: getLibraryParentFolder(normalizedFolder),
         items: toLibraryViewItems(items),
         folders,
-        ...extraPayload
+        ...extraPayload,
+        onlineSources: extraPayload.onlineSources || onlineSources
     };
     const script = `window.__voiceFileSenderBridge?.setLibrary(${JSON.stringify(payload)});`;
     await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
@@ -1562,6 +2870,61 @@ async function setInjectedPreview(browserWindow, payload = {}) {
     }
     const script = `window.__voiceFileSenderBridge?.playPreview(${JSON.stringify(payload)});`;
     await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
+}
+
+async function getPreviewMediaUrl(previewItem) {
+    if (typeof voiceMediaUrlResolver !== 'function') {
+        throw new Error('The voice preview media server is unavailable.');
+    }
+    return await voiceMediaUrlResolver(previewItem.previewPath, {
+        format: previewItem.previewFormat || getDirectPreviewFormat(previewItem.previewPath) || 'wav'
+    });
+}
+
+async function setInjectedCompatiblePttSource(browserWindow, payload = {}) {
+    if (browserWindow.isDestroyed()) {
+        return;
+    }
+    const script = `window.__voiceFileSenderBridge?.useCompatiblePttSource?.(${JSON.stringify(payload)});`;
+    await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
+}
+
+async function createCompatiblePttPlayback(browserWindow, sourcePath, ptt) {
+    const decodeNative = voiceKeepPlayingAcrossChats && isQqNativePttFile(sourcePath);
+    const stream = await probeAudioStream(sourcePath).catch(() => ({}));
+    const declaredDurationMs = Math.max(0, Number(ptt?.duration) || 0) * 1000;
+    const durationMs = Math.max(20, Number(stream.durationMs) || declaredDurationMs || 1000);
+    if (typeof voiceMediaUrlResolver !== 'function') {
+        throw new Error('The original voice media server is unavailable.');
+    }
+    const previewPath = decodeNative
+        ? await createAudioPreviewFile(sourcePath, `persistent-ptt|${ptt?.md5HexStr || sourcePath}`)
+        : sourcePath;
+    const [previewUrl, silentSilk] = await Promise.all([
+        voiceMediaUrlResolver(previewPath, {
+            format: decodeNative ? 'wav' : detectMediaInputFormat(sourcePath)
+        }),
+        createSilentSilk(durationMs)
+    ]);
+    const silkPath = await makeTempSilkPath();
+    await fs.writeFile(silkPath, silentSilk.data);
+    try {
+        const nativeElement = await createPttElement(
+            browserWindow,
+            silkPath,
+            durationMs / 1000,
+            Array.isArray(ptt?.waveAmplitudes) && ptt.waveAmplitudes.length
+                ? ptt.waveAmplitudes
+                : DEFAULT_RAW_WAVE_AMPLITUDES
+        );
+        return {
+            pttElement: nativeElement.pttElement,
+            previewUrl,
+            durationMs
+        };
+    } finally {
+        await fs.unlink(silkPath).catch(() => {});
+    }
 }
 
 function normalizePeerText(value) {
@@ -1753,8 +3116,79 @@ async function createNativePttCacheFile(silkPath) {
     return result;
 }
 
-async function createPttElement(silkPath, durationSeconds, waveAmplitudes) {
-    const fileInfo = await createNativePttCacheFile(silkPath);
+async function createNativeRawPttCacheFile(browserWindow, sourcePath, preferredFileName = '') {
+    const [md5, stat] = await Promise.all([
+        getFileMd5(sourcePath),
+        fs.stat(sourcePath)
+    ]);
+    // QQ's raw PTT path identifies the payload by its hash. The original
+    // extension is retained in the cached bytes and does not belong in the
+    // canonical pttElement fileName (matching QQ/Euphony's native shape).
+    const fileName = md5;
+    const pathInfo = {
+        md5HexStr: md5,
+        fileName,
+        elementType: 2,
+        elementSubType: 0,
+        thumbSize: 0,
+        needCreate: true,
+        downloadType: 1,
+        file_uuid: ''
+    };
+    const attempts = [
+        { path_info: pathInfo },
+        pathInfo
+    ];
+    let cachePath = '';
+    let lastResult;
+    for (const payload of attempts) {
+        let result;
+        try {
+            result = await qqNativeInvoke(
+                browserWindow,
+                'ntApi',
+                'nodeIKernelMsgService/getRichMediaFilePathForGuild',
+                [payload],
+                true,
+                15000
+            );
+        } catch (error) {
+            lastResult = { error: error?.message || String(error) };
+            continue;
+        }
+        lastResult = result;
+        if (isNativeFailure(result)) {
+            continue;
+        }
+        const value = unwrapNativeValue(result);
+        const directPath = typeof value === 'string'
+            ? value
+            : (typeof result === 'string' ? result : '');
+        cachePath = normalizeStoredPath(directPath || findNativePath(value) || findNativePath(result));
+        if (cachePath) {
+            break;
+        }
+    }
+    if (!cachePath) {
+        throw new Error(`QQ did not provide a raw voice cache path: ${safeJson(lastResult)}`);
+    }
+    await fs.mkdir(path.dirname(cachePath), { recursive: true });
+    if (normalizeComparablePath(sourcePath) !== normalizeComparablePath(cachePath)) {
+        await fs.copyFile(sourcePath, cachePath);
+    }
+    return {
+        fileName,
+        filePath: cachePath,
+        md5HexStr: md5,
+        fileSize: String(stat.size),
+        sourcePath
+    };
+}
+
+async function createPttElement(browserWindow, sourcePath, durationSeconds, waveAmplitudes, options = {}) {
+    const fileInfo = options.raw
+        ? await createNativeRawPttCacheFile(browserWindow, sourcePath, options.fileName)
+        : await createNativePttCacheFile(sourcePath);
     const actualDuration = Math.max(1, Math.ceil(Number(durationSeconds) || 1));
     return {
         elementType: 4,
@@ -1765,7 +3199,7 @@ async function createPttElement(silkPath, durationSeconds, waveAmplitudes) {
             md5HexStr: fileInfo.md5HexStr,
             fileSize: fileInfo.fileSize,
             duration: fakeVoiceDurationSeconds || actualDuration,
-            formatType: 1,
+            formatType: Number(options.formatType) || 1,
             voiceType: 1,
             voiceChangeType: 0,
             canConvert2Text: true,
@@ -1851,16 +3285,80 @@ function normalizeSendPeer(browserWindow, peer) {
     };
 }
 
+async function prepareOriginalMediaPath(mediaPath) {
+    if (isSilkFile(mediaPath)) {
+        const data = await fs.readFile(mediaPath);
+        return {
+            path: mediaPath,
+            durationMs: estimateSilkDurationMs(data),
+            fileName: path.basename(mediaPath),
+            temporary: false
+        };
+    }
+    if (isVideoMediaPath(mediaPath)) {
+        const extracted = await extractAudioTrackWithoutReencoding(mediaPath, {
+            outputDir: getPluginTempDir()
+        });
+        return {
+            ...extracted,
+            fileName: `${path.basename(mediaPath, path.extname(mediaPath))}${extracted.extension}`,
+            temporary: true
+        };
+    }
+    const stream = await probeAudioStream(mediaPath);
+    return {
+        path: mediaPath,
+        durationMs: stream.durationMs,
+        fileName: path.basename(mediaPath),
+        temporary: false
+    };
+}
+
+async function sendOriginalMediaPathAsPtt(browserWindow, peer, mediaPath, options = {}) {
+    const prepared = await prepareOriginalMediaPath(mediaPath);
+    try {
+        const durationSeconds = Number(options.durationMs) > 0
+            ? Number(options.durationMs) / 1000
+            : Number(prepared.durationMs) / 1000;
+        const pttElement = await createPttElement(
+            browserWindow,
+            prepared.path,
+            durationSeconds,
+            DEFAULT_RAW_WAVE_AMPLITUDES,
+            {
+                raw: true,
+                fileName: prepared.fileName
+            }
+        );
+        const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
+        return await sendPttElement(
+            browserWindow,
+            peer,
+            pttElement,
+            makeSendAttributeInfos(attrId)
+        );
+    } finally {
+        if (prepared.temporary) {
+            await fs.unlink(prepared.path).catch(() => {});
+        }
+    }
+}
+
 async function sendMediaPathAsPtt(browserWindow, peer, mediaPath, options = {}) {
     peer = normalizeSendPeer(browserWindow, peer);
     if (!isSupportedMediaPath(mediaPath) && !isSilkFile(mediaPath)) {
         throw new Error(`Unsupported audio or video file: ${mediaPath}`);
+    }
+    const sendMode = normalizeVoiceSendMode(options.sendMode);
+    if (sendMode === 'original') {
+        return await sendOriginalMediaPathAsPtt(browserWindow, peer, mediaPath, options);
     }
     const silkResult = await encodeMediaFileToSilk(mediaPath, options);
     const silkPath = await makeTempSilkPath();
     await fs.writeFile(silkPath, silkResult.data);
     try {
         const pttElement = await createPttElement(
+            browserWindow,
             silkPath,
             silkResult.duration / 1000,
             silkResult.waveAmplitudes
@@ -1879,7 +3377,7 @@ async function sendSilkPathAsPtt(browserWindow, peer, silkPath, durationSeconds 
     }
     if (isSilkFile(silkPath) && Array.isArray(waveAmplitudes) && waveAmplitudes.length) {
         peer = normalizeSendPeer(browserWindow, peer);
-        const pttElement = await createPttElement(silkPath, durationSeconds, waveAmplitudes);
+        const pttElement = await createPttElement(browserWindow, silkPath, durationSeconds, waveAmplitudes);
         const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
         return await sendPttElement(
             browserWindow,
@@ -1895,22 +3393,32 @@ async function sendSilkPathAsPtt(browserWindow, peer, silkPath, durationSeconds 
 
 async function waitForInjectedAction(browserWindow) {
     const source = `window.__voiceFileSenderEnabled = ${JSON.stringify(voiceFeatureEnabled)};` +
+        `window.__voiceFileSenderKeepPlayingAcrossChats = ${JSON.stringify(voiceKeepPlayingAcrossChats)};` +
         `window.__voiceFileSenderSaveInContextMenuEnabled = ${JSON.stringify(voiceSaveInContextMenuEnabled)};` +
         `window.__voiceFileSenderForwardInContextMenuEnabled = ${JSON.stringify(voiceForwardInContextMenuEnabled)};` +
         `(${injectedVoiceFileSenderUi.toString()})((${createVoiceLibraryPanel.toString()}), ${JSON.stringify(VOICE_LIBRARY_PANEL_CSS)})`;
     return await browserWindow.webContents.executeJavaScript(source, true);
 }
 
-async function sendLibraryItemAsPtt(browserWindow, peer, itemId) {
+async function sendLibraryItemAsPtt(browserWindow, peer, itemId, options = {}) {
     let item = await getLibraryItem(itemId);
     if (!item) {
         throw new Error(`Voice library item was not found: ${itemId}`);
     }
     if (item.kind === 'ptt') {
+        if (options.sendMode === 'original' && item.sourcePath &&
+            fsSync.existsSync(normalizeStoredPath(item.sourcePath)) &&
+            isSupportedMediaPath(item.sourcePath)) {
+            return await sendMediaPathAsPtt(browserWindow, peer, item.sourcePath, {
+                sendMode: 'original',
+                durationMs: Number(item.duration) > 0 ? Number(item.duration) * 1000 : undefined
+            });
+        }
         return await sendSilkPathAsPtt(browserWindow, peer, item.path, Number(item.duration) || 0);
     }
     return await sendMediaPathAsPtt(browserWindow, peer, item.path, {
-        durationMs: Number(item.duration) > 0 ? Number(item.duration) * 1000 : undefined
+        durationMs: Number(item.duration) > 0 ? Number(item.duration) * 1000 : undefined,
+        sendMode: options.sendMode
     });
 }
 
@@ -1943,6 +3451,38 @@ async function handleInjectedAction(browserWindow, action) {
     if (!action?.type) {
         return;
     }
+    if (action.type === 'playCompatiblePtt') {
+        const ptt = sanitizePttInfo(action.ptt);
+        const id = String(action.id || '');
+        if (!id || !ptt) {
+            return;
+        }
+        try {
+            let sourcePath = resolvePttSourcePath(ptt);
+            if (!sourcePath) {
+                pttSourceResolver.invalidate();
+                sourcePath = resolvePttSourcePath(ptt);
+            }
+            const expectedSize = Math.max(0, Math.trunc(Number(ptt.fileSize) || 0));
+            const actualSize = sourcePath
+                ? Number(await fs.stat(sourcePath).then(stat => stat.size).catch(() => 0))
+                : 0;
+            if (!sourcePath || !actualSize || (expectedSize && actualSize < expectedSize)) {
+                await setInjectedCompatiblePttSource(browserWindow, { id, native: true });
+                return;
+            }
+            if (isQqNativePttFile(sourcePath) && !voiceKeepPlayingAcrossChats) {
+                await setInjectedCompatiblePttSource(browserWindow, { id, native: true });
+                return;
+            }
+            const playback = await createCompatiblePttPlayback(browserWindow, sourcePath, ptt);
+            await setInjectedCompatiblePttSource(browserWindow, { id, ...playback });
+        } catch (error) {
+            await setInjectedCompatiblePttSource(browserWindow, { id, error: true });
+            throw error;
+        }
+        return;
+    }
     if (action.type === 'list') {
         await refreshInjectedLibrary(browserWindow, '', action.folder || '');
         return;
@@ -1970,6 +3510,170 @@ async function handleInjectedAction(browserWindow, action) {
         }
         const savedItems = await withLibraryIndexMutation(() => addMediaFilesToLibrary(result.filePaths || [], action.folder || ''));
         await refreshInjectedLibrary(browserWindow, savedItems.length ? '已添加' : '无音视频', action.folder || '');
+        return;
+    }
+    if (action.type === 'listOnlineSources') {
+        await refreshInjectedLibrary(browserWindow, '', action.folder || '', {
+            onlineSources: await listOnlineSources()
+        });
+        return;
+    }
+    if (action.type === 'importOnlineSource') {
+        const imported = await importOnlineSource(action.input || action.url || action.path, {
+            id: action.id
+        });
+        await refreshInjectedLibrary(browserWindow, `已导入音源：${imported.name}`, action.folder || '', {
+            onlineSources: await listOnlineSources()
+        });
+        return;
+    }
+    if (action.type === 'searchOnlineSource') {
+        const requestId = String(action.requestId || '');
+        const result = await searchOnlineSource({
+            sourceId: action.sourceId,
+            providerId: action.providerId,
+            keyword: action.keyword,
+            recommend: action.recommend === true,
+            page: action.page,
+            limit: action.limit
+        });
+        await setInjectedLibrary(browserWindow, action.folder || '', {
+            onlineSearchResults: result.results,
+            onlineSearchContext: {
+                requestId,
+                sourceId: result.sourceId,
+                providerId: result.providerId,
+                keyword: result.keyword,
+                page: result.page,
+                hasMore: result.hasMore,
+                quality: action.quality || '320k',
+                action: action.resultAction === 'save' ? 'save' : 'send'
+            }
+        });
+        await setInjectedStatus(browserWindow,
+            result.results.length ? '' : '\u672a\u627e\u5230\u5339\u914d\u7684\u6b4c\u66f2',
+            { disabled: false, resetAfterMs: result.results.length ? undefined : 1800 });
+        return;
+    }
+    if (action.type === 'searchOnlineSources') {
+        const requestId = String(action.requestId || '');
+        const targets = Array.isArray(action.targets) ? action.targets : [];
+        const result = await searchOnlineSources({
+            targets,
+            keyword: action.keyword,
+            recommend: action.recommend === true,
+            page: action.page,
+            limit: action.limit,
+            quality: action.quality
+        });
+        await setInjectedLibrary(browserWindow, action.folder || '', {
+            onlineSearchResults: result.results,
+            onlineSearchContext: {
+                requestId,
+                targets: targets.map(target => ({
+                    sourceId: String(target?.sourceId || ''),
+                    providerId: String(target?.providerId || '')
+                })),
+                keyword: String(action.keyword || ''),
+                recommend: action.recommend === true,
+                quality: action.quality || '320k'
+            }
+        });
+        const emptyMessage = result.failures.length
+            ? '\u90e8\u5206\u97f3\u6e90\u641c\u7d22\u5931\u8d25'
+            : '\u672a\u627e\u5230\u5339\u914d\u7684\u6b4c\u66f2';
+        await setInjectedStatus(browserWindow,
+            result.results.length ? '' : emptyMessage,
+            { disabled: false, resetAfterMs: result.results.length ? undefined : 1800 });
+        return;
+    }
+    if (action.type === 'browseOnlineCatalog') {
+        const requestId = String(action.requestId || '');
+        const targets = Array.isArray(action.targets) ? action.targets : [];
+        const result = await browseOnlineCatalog({
+            targets,
+            mode: action.mode,
+            sort: action.sort,
+            collection: action.collection,
+            page: action.page,
+            limit: action.limit
+        });
+        await setInjectedLibrary(browserWindow, action.folder || '', {
+            onlineBrowseItems: result.items,
+            onlineBrowseContext: {
+                requestId,
+                mode: result.mode,
+                sort: result.sort,
+                targets,
+                collection: action.collection || null,
+                info: result.info || {},
+                failures: result.failures
+            }
+        });
+        const emptyMessage = result.failures.length
+            ? '\u90e8\u5206\u5728\u7ebf\u5185\u5bb9\u52a0\u8f7d\u5931\u8d25'
+            : '\u6682\u65e0\u53ef\u7528\u5185\u5bb9';
+        await setInjectedStatus(browserWindow,
+            result.items.length ? '' : emptyMessage,
+            { disabled: false, resetAfterMs: result.items.length ? undefined : 1800 });
+        return;
+    }
+    if (action.type === 'previewOnlineAudio') {
+        const previewItem = await createOnlineAudioPreview({
+            id: action.id,
+            sourceId: action.sourceId,
+            providerId: action.providerId,
+            quality: action.quality,
+            songInfo: action.songInfo,
+            title: action.title
+        });
+        await setInjectedPreview(browserWindow, {
+            id: previewItem.id,
+            previewUrl: await getPreviewMediaUrl(previewItem),
+            previewTitle: previewItem.title
+        });
+        await setInjectedStatus(browserWindow, '已加载播放', {
+            disabled: false,
+            resetAfterMs: 1200
+        });
+        return;
+    }
+    if (action.type === 'downloadOnlineAudio' || action.type === 'sendOnlineAudio') {
+        const cached = await downloadOnlineSourceAudio({
+            url: action.url,
+            sourceId: action.sourceId,
+            providerId: action.providerId,
+            quality: action.quality,
+            songInfo: action.songInfo,
+            title: action.title || action.fileName
+        });
+        try {
+            if (action.type === 'sendOnlineAudio') {
+                if (!action.peer) {
+                    throw new Error('未找到当前聊天对象。');
+                }
+                await sendMediaPathAsPtt(browserWindow, action.peer, cached.path, {
+                    sendMode: normalizeVoiceSendMode(action.sendMode),
+                    durationMs: Number(cached.duration) > 0 ? Number(cached.duration) * 1000 : undefined
+                });
+                await setInjectedStatus(browserWindow, '\u5df2\u53d1\u9001\u5728\u7ebf\u97f3\u9891', {
+                    resetAfterMs: 1800
+                });
+            } else {
+                const item = await withLibraryIndexMutation(() => addMediaFileToLibrary(cached.path, action.folder || '', {
+                    title: cached.title,
+                    sourcePath: '',
+                    originalName: cached.fileName
+                }));
+                await refreshInjectedLibrary(browserWindow, '已保存在线音频', action.folder || '', {
+                    selectedItem: toLibraryViewItems([item])[0]
+                });
+            }
+        } finally {
+            if (cached.temporary) {
+                await fs.unlink(cached.path).catch(() => {});
+            }
+        }
         return;
     }
     if (action.type === 'deleteLibrary') {
@@ -2004,10 +3708,9 @@ async function handleInjectedAction(browserWindow, action) {
     }
     if (action.type === 'previewLibrary') {
         const previewItem = await createLibraryPreviewItem(action.id);
-        const previewData = await fs.readFile(previewItem.previewPath);
         await setInjectedPreview(browserWindow, {
             id: previewItem.id,
-            previewUrl: `data:audio/wav;base64,${previewData.toString('base64')}`,
+            previewUrl: await getPreviewMediaUrl(previewItem),
             previewTitle: previewItem.title || '语音'
         });
         await setInjectedStatus(browserWindow, '已加载播放', {
@@ -2020,8 +3723,12 @@ async function handleInjectedAction(browserWindow, action) {
         if (!action.peer) {
             throw new Error('No active chat peer was found.');
         }
-        await sendLibraryItemAsPtt(browserWindow, action.peer, action.id);
-        await refreshInjectedLibrary(browserWindow, '已发送', action.folder || '');
+        await sendLibraryItemAsPtt(browserWindow, action.peer, action.id, {
+            sendMode: normalizeVoiceSendMode(action.sendMode)
+        });
+        await setInjectedStatus(browserWindow, '\u5df2\u53d1\u9001', {
+            resetAfterMs: 1800
+        });
         return;
     }
     if (action.type === 'sendPtt') {
@@ -2029,7 +3736,9 @@ async function handleInjectedAction(browserWindow, action) {
             throw new Error('No active chat peer was found.');
         }
         await sendPttInfoAsPtt(browserWindow, action.peer, action.ptt);
-        await refreshInjectedLibrary(browserWindow, '已发送', action.folder || '');
+        await setInjectedStatus(browserWindow, '\u5df2\u53d1\u9001', {
+            resetAfterMs: 1800
+        });
         return;
     }
 
@@ -2058,56 +3767,119 @@ async function handleInjectedAction(browserWindow, action) {
     if (!action.peer) {
         throw new Error('No active chat peer was found.');
     }
+    await setInjectedStatus(browserWindow, '\u53d1\u9001\u4e2d', { disabled: false });
     for (const filePath of filePaths) {
-        await sendMediaPathAsPtt(browserWindow, action.peer, filePath);
+        await sendMediaPathAsPtt(browserWindow, action.peer, filePath, {
+            sendMode: normalizeVoiceSendMode(action.sendMode)
+        });
     }
-    await refreshInjectedLibrary(browserWindow, '已发送', action.folder || '');
+    await setInjectedStatus(browserWindow, '\u5df2\u53d1\u9001', {
+        resetAfterMs: 1800
+    });
 }
 
 async function runInjectedUiLoop(browserWindow) {
     const state = getWindowState(browserWindow);
-    if (!voiceFeatureEnabled || state.uiLoopRunning || browserWindow.isDestroyed()) {
+    if (!voiceFeatureEnabled || state.uiLoopRunning || !isVoiceUiHost(browserWindow)) {
         return;
     }
     state.uiLoopRunning = true;
-    while (!browserWindow.isDestroyed()) {
-        let action = null;
-        try {
-            action = await waitForInjectedAction(browserWindow);
-            if (shouldRecordVoiceAction(action)) {
-                recordDiagnostic('info', 'voice.action-requested', getVoiceActionSummary(action));
-            }
-            await handleInjectedAction(browserWindow, action);
-            if (shouldRecordVoiceAction(action)) {
-                recordDiagnostic('info', 'voice.action-completed', getVoiceActionSummary(action));
-            }
-        } catch (error) {
-            recordDiagnostic('error', 'voice.action-failed', {
-                ...getVoiceActionSummary(action),
-                error
-            });
-            if (!browserWindow.isDestroyed()) {
-                await setInjectedStatus(browserWindow, error?.message || String(error), {
-                    disabled: false,
-                    error: true,
-                    resetAfterMs: 2600
+    try {
+        while (voiceFeatureEnabled && isVoiceUiHost(browserWindow)) {
+            let action = null;
+            try {
+                action = await waitForInjectedAction(browserWindow);
+                if (shouldRecordVoiceAction(action)) {
+                    recordDiagnostic('info', 'voice.action-requested', getVoiceActionSummary(action));
+                }
+                await handleInjectedAction(browserWindow, action);
+                if (shouldRecordVoiceAction(action)) {
+                    recordDiagnostic('info', 'voice.action-completed', getVoiceActionSummary(action));
+                }
+            } catch (error) {
+                recordDiagnostic('error', 'voice.action-failed', {
+                    ...getVoiceActionSummary(action),
+                    error
                 });
-                await new Promise(resolve => setTimeout(resolve, 1200));
+                if (isVoiceUiHost(browserWindow)) {
+                    await setInjectedStatus(browserWindow, error?.message || String(error), {
+                        disabled: false,
+                        error: true,
+                        resetAfterMs: 2600
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 1200));
+                }
             }
         }
+    } finally {
+        state.uiLoopRunning = false;
     }
-    state.uiLoopRunning = false;
+}
+
+function isVoiceUiHostUrl(url) {
+    const value = String(url || '');
+    return VOICE_UI_ROUTE_MARKERS.some(route => value.includes(route));
+}
+
+function isVoiceUiHost(browserWindow, candidateUrl = '') {
+    if (!browserWindow || browserWindow.isDestroyed() || browserWindow.webContents.isDestroyed?.()) {
+        return false;
+    }
+    let url = String(candidateUrl || '');
+    if (!url) {
+        try {
+            url = browserWindow.webContents.getURL();
+        } catch {
+            return false;
+        }
+    }
+    return isVoiceUiHostUrl(url);
+}
+
+function scheduleInjectedUi(browserWindow, candidateUrl = '', delayMs = 300) {
+    if (!voiceFeatureEnabled || !isVoiceUiHost(browserWindow, candidateUrl)) {
+        return;
+    }
+    const state = getWindowState(browserWindow);
+    if (!state.nativeRequestInstalled) {
+        state.nativeRequestInstalled = true;
+        addNativeRequestHandler(browserWindow, handleVoiceNativeRequest);
+    }
+    if (state.uiLoopRunning || state.uiStartTimer) {
+        return;
+    }
+    state.uiStartTimer = setTimeout(() => {
+        state.uiStartTimer = null;
+        if (!voiceFeatureEnabled || !isVoiceUiHost(browserWindow)) {
+            return;
+        }
+        runInjectedUiLoop(browserWindow).catch(() => {});
+    }, delayMs);
+    state.uiStartTimer.unref?.();
 }
 
 function setupBrowserWindow(browserWindow) {
     if (!voiceFeatureEnabled || !browserWindow || browserWindow.isDestroyed()) {
         return;
     }
-    addNativeRequestHandler(browserWindow, handleVoiceNativeRequest);
-    const start = () => runInjectedUiLoop(browserWindow).catch(() => {});
-    browserWindow.webContents.once('dom-ready', () => setTimeout(start, 500));
-    browserWindow.webContents.on('did-finish-load', () => setTimeout(start, 500));
-    setTimeout(start, 1200);
+    const state = getWindowState(browserWindow);
+    if (!state.uiSetupInstalled) {
+        state.uiSetupInstalled = true;
+        const scheduleCurrentRoute = () => scheduleInjectedUi(browserWindow);
+        const scheduleNavigatedRoute = (_event, url, isMainFrame) => {
+            if (isMainFrame !== false) {
+                scheduleInjectedUi(browserWindow, url);
+            }
+        };
+        browserWindow.webContents.on('dom-ready', scheduleCurrentRoute);
+        browserWindow.webContents.on('did-finish-load', scheduleCurrentRoute);
+        browserWindow.webContents.on('did-navigate-in-page', scheduleNavigatedRoute);
+        browserWindow.once('closed', () => {
+            clearTimeout(state.uiStartTimer);
+            state.uiStartTimer = null;
+        });
+    }
+    scheduleInjectedUi(browserWindow);
 }
 
 function onBrowserWindowCreated(browserWindow) {
@@ -2121,15 +3893,23 @@ function setupAllWindows() {
 }
 
 async function setInjectedEnabled(browserWindow, enabled) {
-    if (!browserWindow || browserWindow.isDestroyed()) {
+    if (!isVoiceUiHost(browserWindow)) {
         return;
     }
     const source = `window.__voiceFileSenderEnabled = ${JSON.stringify(enabled)}; window.__voiceFileSenderBridge?.setEnabled?.(${JSON.stringify(enabled)});`;
     await browserWindow.webContents.executeJavaScript(source, true).catch(() => {});
 }
 
+async function setInjectedKeepPlayingAcrossChats(browserWindow, enabled) {
+    if (!isVoiceUiHost(browserWindow)) {
+        return;
+    }
+    const source = `window.__voiceFileSenderKeepPlayingAcrossChats = ${JSON.stringify(enabled)}; window.__voiceFileSenderBridge?.setKeepPlayingAcrossChats?.(${JSON.stringify(enabled)});`;
+    await browserWindow.webContents.executeJavaScript(source, true).catch(() => {});
+}
+
 async function setInjectedSaveInContextMenuEnabled(browserWindow, enabled) {
-    if (!browserWindow || browserWindow.isDestroyed()) {
+    if (!isVoiceUiHost(browserWindow)) {
         return;
     }
     const source = `window.__voiceFileSenderSaveInContextMenuEnabled = ${JSON.stringify(enabled)}; window.__voiceFileSenderBridge?.setSaveInContextMenuEnabled?.(${JSON.stringify(enabled)});`;
@@ -2137,7 +3917,7 @@ async function setInjectedSaveInContextMenuEnabled(browserWindow, enabled) {
 }
 
 async function setInjectedForwardInContextMenuEnabled(browserWindow, enabled) {
-    if (!browserWindow || browserWindow.isDestroyed()) {
+    if (!isVoiceUiHost(browserWindow)) {
         return;
     }
     const source = `window.__voiceFileSenderForwardInContextMenuEnabled = ${JSON.stringify(enabled)}; window.__voiceFileSenderBridge?.setForwardInContextMenuEnabled?.(${JSON.stringify(enabled)});`;
@@ -2155,6 +3935,13 @@ function setEnabled(enabled) {
     }
 }
 
+function setKeepPlayingAcrossChats(enabled) {
+    voiceKeepPlayingAcrossChats = enabled === true;
+    for (const browserWindow of BrowserWindow.getAllWindows()) {
+        setInjectedKeepPlayingAcrossChats(browserWindow, voiceKeepPlayingAcrossChats);
+    }
+}
+
 function setSaveInContextMenuEnabled(enabled) {
     voiceSaveInContextMenuEnabled = enabled === true;
     for (const browserWindow of BrowserWindow.getAllWindows()) {
@@ -2167,6 +3954,14 @@ function setForwardInContextMenuEnabled(enabled) {
     for (const browserWindow of BrowserWindow.getAllWindows()) {
         setInjectedForwardInContextMenuEnabled(browserWindow, voiceForwardInContextMenuEnabled);
     }
+}
+
+function setNetworkFetch(fetcher) {
+    voiceNetworkFetch = typeof fetcher === 'function' ? fetcher : null;
+}
+
+function setMediaUrlResolver(resolver) {
+    voiceMediaUrlResolver = typeof resolver === 'function' ? resolver : null;
 }
 
 function setFakeDurationSeconds(value) {
@@ -2184,11 +3979,16 @@ module.exports = {
     onBrowserWindowCreated,
     rememberNativePeerAliases,
     setEnabled,
+    setKeepPlayingAcrossChats,
     setSaveInContextMenuEnabled,
     setForwardInContextMenuEnabled,
+    setNetworkFetch,
+    setMediaUrlResolver,
     setFakeDurationSeconds,
     setDiagnosticRecorder,
-    createPttPreviewItem,
+    getOnlineSourceState,
+    runOnlineSourceAction,
+    browseOnlineCatalog,
     sendPttInfoAsPtt,
     sanitizePttInfo,
     runTool

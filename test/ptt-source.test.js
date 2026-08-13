@@ -39,6 +39,7 @@ test('reads only canonical PTT fields', () => {
             sourcePath: 'D:\\voice\\source.amr',
             fileName: 'real.amr',
             md5HexStr: md5,
+            fileSize: '4096',
             duration: 149,
             waveAmplitudes: new Uint8Array([0, 25, 100]),
             fileUuid: 'uuid',
@@ -54,11 +55,25 @@ test('reads only canonical PTT fields', () => {
         sourcePath: 'D:\\voice\\source.amr',
         fileName: 'real.amr',
         md5HexStr: md5.toLowerCase(),
+        fileSize: 4096,
         duration: 149,
         waveAmplitudes: [0, 25, 99],
         fileUuid: 'uuid',
         fileSubId: 'sub-id',
         fileId: 'file-id'
+    });
+});
+
+test('omits invalid PTT file sizes', () => {
+    assert.deepEqual(sanitizePttInfo({ fileName: 'voice.mp3', fileSize: 'unknown' }), {
+        filePath: '',
+        sourcePath: '',
+        fileName: 'voice.mp3',
+        md5HexStr: '',
+        duration: 0,
+        fileUuid: '',
+        fileSubId: '',
+        fileId: ''
     });
 });
 

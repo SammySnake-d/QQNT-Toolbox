@@ -4,5 +4,6 @@ release/
 *.zip
 *.log
 *.tmp
+.artifacts-*.silk
 .DS_Store
 Thumbs.db
