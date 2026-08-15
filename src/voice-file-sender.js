@@ -970,21 +970,23 @@ async function runOnlineSourceAction(request = {}) {
         if (type === 'import') {
             const imported = await importOnlineSource(request.input, { id: request.id });
             recordDiagnostic('info', 'voice.online-source-imported', { sourceId: imported.id });
-            broadcastOnlineSources().catch(() => {});
+            const sources = await listOnlineSources();
+            await broadcastOnlineSources(sources);
             return {
                 ok: true,
                 source: imported,
-                sources: await listOnlineSources()
+                sources
             };
         }
         if (type === 'delete') {
             const removed = await deleteOnlineSource(request.id);
             recordDiagnostic('info', 'voice.online-source-deleted', { sourceId: removed.id });
-            broadcastOnlineSources().catch(() => {});
+            const sources = await listOnlineSources();
+            await broadcastOnlineSources(sources);
             return {
                 ok: true,
                 removedId: removed.id,
-                sources: await listOnlineSources()
+                sources
             };
         }
         return {
@@ -2807,10 +2809,12 @@ async function setInjectedOnlineSources(browserWindow, onlineSources) {
     await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
 }
 
-async function broadcastOnlineSources() {
-    const onlineSources = await listOnlineSources().catch(() => []);
+async function broadcastOnlineSources(onlineSources = null) {
+    const sources = Array.isArray(onlineSources)
+        ? onlineSources
+        : await listOnlineSources().catch(() => []);
     for (const browserWindow of BrowserWindow.getAllWindows()) {
-        await setInjectedOnlineSources(browserWindow, onlineSources);
+        await setInjectedOnlineSources(browserWindow, sources);
     }
 }
 

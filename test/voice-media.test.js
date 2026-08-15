@@ -1005,7 +1005,9 @@ test('renders the voice library as a direct file browser with contextual actions
     assert.match(panelSource, /switchToOnline: '\\u5728\\u7ebf\\u97f3\\u6e90'/);
     assert.match(panelSource, /const reopening = Boolean\(state\.root\?\.isConnected\);/);
     assert.match(panelSource, /state\.root = buildPanel\(\);[\s\S]*?renderViewControls\(\);/);
-    assert.match(panelSource, /if \(!reopening\) \{[\s\S]*?emit\(\{ type: 'list' \}\);/);
+    assert.match(panelSource, /emit\(\{ type: reopening \? 'listOnlineSources' : 'list' \}\);/);
+    assert.match(senderSource, /const sources = await listOnlineSources\(\);\s*await broadcastOnlineSources\(sources\);/);
+    assert.match(senderSource, /async function broadcastOnlineSources\(onlineSources = null\)/);
     assert.match(panelSource, /audio\?\.pause\?\.\(\);[\s\S]*?state\.root\.hidden = true;/);
     assert.match(panelSource, /if \(state\.root\.hidden\) \{[\s\S]*?\.qvlib-toast[\s\S]*?return;/);
     assert.match(panelSource, /audio\.src = payload\.previewUrl;[\s\S]*?if \(!state\.root\.hidden\) \{[\s\S]*?audio\.play/);
