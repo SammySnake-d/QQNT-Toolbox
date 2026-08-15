@@ -143,6 +143,14 @@ test('manages imported online voice sources through the main-process API', async
         const missing = await library.runOnlineSourceAction({ type: 'delete', id: sourceId });
         assert.equal(missing.ok, false);
         assert.equal(missing.reason, 'source-not-found');
+        const invalid = await library.runOnlineSourceAction({
+            type: 'import',
+            input: "lx.on('request', () => 'https://example.test/voice.mp3'); lx.send('inited', { sources: {} });"
+        });
+        assert.equal(invalid.ok, false);
+        assert.equal(invalid.reason, 'no-compatible-sources');
+        assert.equal(invalid.message, '音源脚本未提供可用的音乐源。');
+        assert.deepEqual(invalid.sources, []);
     });
 });
 
@@ -1005,9 +1013,7 @@ test('renders the voice library as a direct file browser with contextual actions
     assert.match(panelSource, /switchToOnline: '\\u5728\\u7ebf\\u97f3\\u6e90'/);
     assert.match(panelSource, /const reopening = Boolean\(state\.root\?\.isConnected\);/);
     assert.match(panelSource, /state\.root = buildPanel\(\);[\s\S]*?renderViewControls\(\);/);
-    assert.match(panelSource, /emit\(\{ type: reopening \? 'listOnlineSources' : 'list' \}\);/);
-    assert.match(senderSource, /const sources = await listOnlineSources\(\);\s*await broadcastOnlineSources\(sources\);/);
-    assert.match(senderSource, /async function broadcastOnlineSources\(onlineSources = null\)/);
+    assert.match(panelSource, /if \(!reopening\) \{[\s\S]*?emit\(\{ type: 'list' \}\);/);
     assert.match(panelSource, /audio\?\.pause\?\.\(\);[\s\S]*?state\.root\.hidden = true;/);
     assert.match(panelSource, /if \(state\.root\.hidden\) \{[\s\S]*?\.qvlib-toast[\s\S]*?return;/);
     assert.match(panelSource, /audio\.src = payload\.previewUrl;[\s\S]*?if \(!state\.root\.hidden\) \{[\s\S]*?audio\.play/);

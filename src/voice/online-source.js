@@ -2375,6 +2375,30 @@ async function loadScriptInput(input, options = {}) {
     return { source: await fsp.readFile(filePath, 'utf8'), sourcePath: filePath, sourceUrl: '' };
 }
 
+async function resolveLXMusicRuntimeMetadata(source, metadata, options = {}) {
+    if (options.resolveRuntimeMetadata !== false) {
+        const runner = createLXMusicSourceRunner(source, {
+            ...options,
+            metadata
+        });
+        try {
+            return normalizeMetadata(await runner.waitForReady(), metadata);
+        } finally {
+            runner.dispose();
+        }
+    }
+    return metadata;
+}
+
+function assertCompatibleSourceMetadata(metadata) {
+    if (!Object.keys(metadata?.sources || {}).length) {
+        throw new OnlineSourceError(
+            'Source did not announce any compatible providers',
+            'no-compatible-sources'
+        );
+    }
+}
+
 async function importLXMusicUserApiScript(input, options = {}) {
     const loaded = await loadScriptInput(input, options);
     const validated = validateLXMusicUserApiScript(loaded.source, options);
@@ -2382,17 +2406,8 @@ async function importLXMusicUserApiScript(input, options = {}) {
     // `sources` is often built through a local variable instead of an inline
     // literal. Run the trusted source through the same restricted adapter so
     // the persisted metadata reflects the providers it actually announces.
-    if (options.resolveRuntimeMetadata !== false) {
-        const runner = createLXMusicSourceRunner(validated.source, {
-            ...options,
-            metadata
-        });
-        try {
-            metadata = normalizeMetadata(await runner.waitForReady(), metadata);
-        } finally {
-            runner.dispose();
-        }
-    }
+    metadata = await resolveLXMusicRuntimeMetadata(validated.source, metadata, options);
+    assertCompatibleSourceMetadata(metadata);
     const id = normalizeSourceId(options.id || metadata.id) || `online_${validated.hash.slice(0, 16)}`;
     metadata.id = id;
     const result = {
@@ -2422,7 +2437,11 @@ async function importLXMusicUserApiScript(input, options = {}) {
 async function importOnlineSourceScript(input, options = {}) {
     const loaded = await loadScriptInput(input, options);
     const validated = validateOnlineSourceScript(loaded.source, options);
-    const metadata = normalizeMetadata(validated.metadata, options.metadata || {});
+    let metadata = normalizeMetadata(validated.metadata, options.metadata || {});
+    if (validated.format === 'lxmusic') {
+        metadata = await resolveLXMusicRuntimeMetadata(validated.source, metadata, options);
+    }
+    assertCompatibleSourceMetadata(metadata);
     const id = normalizeSourceId(options.id || metadata.id) || `online_${validated.hash.slice(0, 16)}`;
     metadata.id = id;
     const result = {

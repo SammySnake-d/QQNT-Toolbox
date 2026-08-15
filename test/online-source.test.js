@@ -586,6 +586,34 @@ test('persists providers announced through a dynamic source declaration', async 
     assert.deepEqual(Object.keys(savedMetadata.sources), ['kg', 'wy']);
 });
 
+test('resolves dynamic providers through the generic online source importer', async t => {
+    const root = await temporaryDirectory(t);
+    const installRoot = path.join(root, 'installed');
+    const imported = await importOnlineSourceScript(DYNAMIC_SOURCES_SCRIPT, {
+        rootPath: installRoot,
+        id: 'generic-dynamic'
+    });
+
+    assert.equal(imported.format, 'lxmusic');
+    assert.deepEqual(Object.keys(imported.metadata.sources), ['kg', 'wy']);
+    const savedMetadata = JSON.parse(await fs.readFile(imported.metadataPath, 'utf8'));
+    assert.deepEqual(Object.keys(savedMetadata.sources), ['kg', 'wy']);
+});
+
+test('rejects an import with no compatible providers before persistence', async t => {
+    const root = await temporaryDirectory(t);
+    const installRoot = path.join(root, 'installed');
+    const source = `
+      lx.on('request', () => 'https://cdn.example.test/song.mp3');
+      lx.send('inited', { sources: {} });`;
+
+    await assert.rejects(
+        importOnlineSourceScript(source, { rootPath: installRoot }),
+        error => error instanceof OnlineSourceError && error.code === 'no-compatible-sources'
+    );
+    await assert.rejects(fs.stat(installRoot), error => error.code === 'ENOENT');
+});
+
 test('accepts LXMusic gz_ scripts supplied as an encoded string', async t => {
     const root = await temporaryDirectory(t);
     const encoded = `gz_${zlib.deflateSync(Buffer.from(SAMPLE_SCRIPT, 'utf8')).toString('base64')}`;

@@ -2680,7 +2680,9 @@ function createVoiceLibraryPanel(options = {}) {
             window.addEventListener('blur', state.windowBlurHandler);
         }
         updatePlacement();
-        emit({ type: reopening ? 'listOnlineSources' : 'list' });
+        if (!reopening) {
+            emit({ type: 'list' });
+        }
         return true;
     }
 

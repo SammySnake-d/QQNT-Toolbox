@@ -932,6 +932,7 @@ function getOnlineSourceErrorMessage(error) {
         'catalog-unavailable': String(error?.message || '在线曲库目录不可用。'),
         'invalid-script': '脚本内容无效。',
         'invalid-source-id': '在线音源标识无效。',
+        'no-compatible-sources': '音源脚本未提供可用的音乐源。',
         'file-not-found': '找不到指定的本地脚本。',
         'network-error': '下载音源脚本失败，请检查网络后重试。',
         'response-too-large': '音源脚本过大。',
@@ -970,23 +971,19 @@ async function runOnlineSourceAction(request = {}) {
         if (type === 'import') {
             const imported = await importOnlineSource(request.input, { id: request.id });
             recordDiagnostic('info', 'voice.online-source-imported', { sourceId: imported.id });
-            const sources = await listOnlineSources();
-            await broadcastOnlineSources(sources);
             return {
                 ok: true,
                 source: imported,
-                sources
+                sources: await listOnlineSources()
             };
         }
         if (type === 'delete') {
             const removed = await deleteOnlineSource(request.id);
             recordDiagnostic('info', 'voice.online-source-deleted', { sourceId: removed.id });
-            const sources = await listOnlineSources();
-            await broadcastOnlineSources(sources);
             return {
                 ok: true,
                 removedId: removed.id,
-                sources
+                sources: await listOnlineSources()
             };
         }
         return {
@@ -2799,23 +2796,6 @@ async function setInjectedLibrary(browserWindow, folder = '', extraPayload = {})
     const script = `window.__voiceFileSenderBridge?.setLibrary(${JSON.stringify(payload)});`;
     await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
     queueLibraryDurationRefresh(browserWindow, normalizedFolder, missingDurationItems);
-}
-
-async function setInjectedOnlineSources(browserWindow, onlineSources) {
-    if (browserWindow.isDestroyed() || !isVoiceUiHost(browserWindow)) {
-        return;
-    }
-    const script = `window.__voiceFileSenderBridge?.setLibrary(${JSON.stringify({ onlineSources })});`;
-    await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
-}
-
-async function broadcastOnlineSources(onlineSources = null) {
-    const sources = Array.isArray(onlineSources)
-        ? onlineSources
-        : await listOnlineSources().catch(() => []);
-    for (const browserWindow of BrowserWindow.getAllWindows()) {
-        await setInjectedOnlineSources(browserWindow, sources);
-    }
 }
 
 async function setInjectedLibraryItemUpdates(browserWindow, payload) {
