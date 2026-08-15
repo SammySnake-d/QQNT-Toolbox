@@ -970,6 +970,7 @@ async function runOnlineSourceAction(request = {}) {
         if (type === 'import') {
             const imported = await importOnlineSource(request.input, { id: request.id });
             recordDiagnostic('info', 'voice.online-source-imported', { sourceId: imported.id });
+            broadcastOnlineSources().catch(() => {});
             return {
                 ok: true,
                 source: imported,
@@ -979,6 +980,7 @@ async function runOnlineSourceAction(request = {}) {
         if (type === 'delete') {
             const removed = await deleteOnlineSource(request.id);
             recordDiagnostic('info', 'voice.online-source-deleted', { sourceId: removed.id });
+            broadcastOnlineSources().catch(() => {});
             return {
                 ok: true,
                 removedId: removed.id,
@@ -2795,6 +2797,21 @@ async function setInjectedLibrary(browserWindow, folder = '', extraPayload = {})
     const script = `window.__voiceFileSenderBridge?.setLibrary(${JSON.stringify(payload)});`;
     await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
     queueLibraryDurationRefresh(browserWindow, normalizedFolder, missingDurationItems);
+}
+
+async function setInjectedOnlineSources(browserWindow, onlineSources) {
+    if (browserWindow.isDestroyed() || !isVoiceUiHost(browserWindow)) {
+        return;
+    }
+    const script = `window.__voiceFileSenderBridge?.setLibrary(${JSON.stringify({ onlineSources })});`;
+    await browserWindow.webContents.executeJavaScript(script, true).catch(() => {});
+}
+
+async function broadcastOnlineSources() {
+    const onlineSources = await listOnlineSources().catch(() => []);
+    for (const browserWindow of BrowserWindow.getAllWindows()) {
+        await setInjectedOnlineSources(browserWindow, onlineSources);
+    }
 }
 
 async function setInjectedLibraryItemUpdates(browserWindow, payload) {
