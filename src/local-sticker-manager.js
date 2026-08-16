@@ -25,11 +25,18 @@ export function normalizeLocalStickerManagerPacks(store) {
         if (!dirPath || value?.recent === true || packs.has(dirPath)) {
             continue;
         }
+        const stickers = (Array.isArray(value?.stickers) ? value.stickers : [])
+            .map(sticker => ({
+                label: normalizeText(sticker?.label) || '本地贴纸',
+                path: normalizeText(sticker?.path)
+            }))
+            .filter(sticker => sticker.path);
         packs.set(dirPath, {
             dirPath,
             label: normalizeText(value?.label) || '未命名贴纸集',
             icon: normalizeText(value?.icon),
-            count: Array.isArray(value?.stickers) ? value.stickers.length : 0,
+            count: stickers.length,
+            stickers,
             index: Number.isFinite(Number(value?.index)) ? Math.trunc(Number(value.index)) : 0
         });
     }
@@ -70,6 +77,44 @@ function resolveOpaqueSurface(themeRoot, textColor) {
     }
     const text = parseCssColor(textColor);
     return text && text.red + text.green + text.blue > 420 ? '#1f1f1f' : '#ffffff';
+}
+
+function createStickerMedia(filePath, className) {
+    const video = /\.webm$/i.test(String(filePath || ''));
+    const media = createElement(video ? 'video' : 'img', className);
+    media.dataset.stickerPath = filePath;
+    media.src = localStickerFileUrl(filePath);
+    if (video) {
+        media.muted = true;
+        media.defaultMuted = true;
+        media.loop = true;
+        media.autoplay = true;
+        media.playsInline = true;
+        media.preload = 'metadata';
+    } else {
+        media.alt = '';
+        media.decoding = 'async';
+        media.loading = 'lazy';
+    }
+    return media;
+}
+
+function createTrashIcon() {
+    const namespace = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(namespace, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('aria-hidden', 'true');
+    for (const data of ['M3 6h18', 'M8 6V4h8v2', 'M19 6l-1 14H6L5 6', 'M10 10v6', 'M14 10v6']) {
+        const path = document.createElementNS(namespace, 'path');
+        path.setAttribute('d', data);
+        path.setAttribute('stroke', 'currentColor');
+        path.setAttribute('stroke-width', '1.8');
+        path.setAttribute('stroke-linecap', 'round');
+        path.setAttribute('stroke-linejoin', 'round');
+        svg.append(path);
+    }
+    return svg;
 }
 
 function ensureStyle() {
@@ -122,6 +167,8 @@ export function createLocalStickerManager(options = {}) {
         }
         previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         let activeTab = ['packs', 'panel', 'telegram'].includes(initialTab) ? initialTab : 'packs';
+        let managerPacks = [];
+        let expandedPackPath = '';
         let pointerDrag = null;
         let autoScrollFrame = 0;
         let disposed = false;
@@ -152,7 +199,11 @@ export function createLocalStickerManager(options = {}) {
 
         const tabs = createElement('div', 'qlsm-tabs');
         tabs.setAttribute('role', 'tablist');
-        for (const [tabId, label] of [['packs', '贴纸集'], ['panel', '面板'], ['telegram', 'Telegram']]) {
+        for (const [tabId, label] of [
+            ['packs', '贴纸集'],
+            ['panel', '面板'],
+            ['telegram', 'Telegram']
+        ]) {
             const tab = createElement('button', 'qlsm-tab', label);
             tab.type = 'button';
             tab.dataset.tab = tabId;
@@ -205,11 +256,6 @@ export function createLocalStickerManager(options = {}) {
         refreshPacks.type = 'button';
         directoryActions.append(openDirectory, changeDirectory, refreshPacks);
         directoryRow.append(directoryMain, directoryActions);
-        const packIntro = createElement('div', 'qlsm-pane-intro');
-        packIntro.append(
-            createElement('div', 'qlsm-pane-title', '贴纸集排序'),
-            createElement('div', 'qlsm-pane-meta', '拖动手柄调整面板底部的贴纸集顺序')
-        );
         const packList = createElement('div', 'qlsm-pack-list qqnt-toolbox-scrollable');
         packList.setAttribute('role', 'list');
         const packFooter = createElement('footer', 'qlsm-pane-footer');
@@ -218,7 +264,7 @@ export function createLocalStickerManager(options = {}) {
         saveOrder.type = 'button';
         saveOrder.disabled = true;
         packFooter.append(packStatus, saveOrder);
-        packPane.append(directoryRow, packIntro, packList, packFooter);
+        packPane.append(directoryRow, packList, packFooter);
 
         const panelPane = createElement('section', 'qlsm-pane qlsm-panel-pane');
         panelPane.dataset.pane = 'panel';
@@ -323,7 +369,7 @@ export function createLocalStickerManager(options = {}) {
         ffmpegInput.autocomplete = 'off';
         ffmpegInput.spellcheck = false;
         ffmpegInput.setAttribute('aria-label', 'FFmpeg 路径');
-        const ffmpegRow = createConfigRow('FFmpeg 路径', '留空时自动从 PATH 查找；用于视频贴纸', ffmpegInput);
+        const ffmpegRow = createConfigRow('FFmpeg 路径', '留空时自动从 PATH 查找；用于透明视频贴纸转换和 WebM 预览图', ffmpegInput);
         const chooseFfmpeg = createElement('button', 'qlsm-secondary', '选择');
         chooseFfmpeg.type = 'button';
         chooseFfmpeg.dataset.chooseTool = 'ffmpeg';
@@ -439,7 +485,7 @@ export function createLocalStickerManager(options = {}) {
                 ffmpegRow,
                 result.tools?.ffmpeg,
                 Boolean(ffmpegInput.value.trim()),
-                '未在 PATH 中检测到；下载视频贴纸时需要'
+                '未在 PATH 中检测到；透明视频贴纸将保留为 WebM'
             );
             describeTool(
                 tgsRow,
@@ -449,32 +495,86 @@ export function createLocalStickerManager(options = {}) {
             );
         };
 
+        const renderPackStickerGrid = (grid, pack) => {
+            grid.replaceChildren();
+            const stickers = Array.isArray(pack?.stickers) ? pack.stickers : [];
+            const fragment = document.createDocumentFragment();
+            for (const sticker of stickers) {
+                const item = createElement('div', 'qlsm-sticker-item');
+                item.dataset.stickerPath = sticker.path;
+                item.setAttribute('role', 'listitem');
+                item.title = sticker.label;
+                const media = createStickerMedia(sticker.path, 'qlsm-sticker-media');
+                media.addEventListener('error', () => item.dataset.error = 'true', { once: true });
+                const deleteButton = createElement('button', 'qlsm-sticker-delete');
+                deleteButton.type = 'button';
+                deleteButton.dataset.deleteSticker = 'true';
+                deleteButton.setAttribute('aria-label', `删除贴纸 ${sticker.label}`);
+                deleteButton.title = '删除贴纸';
+                deleteButton.append(createTrashIcon());
+                item.append(media, deleteButton);
+                fragment.append(item);
+            }
+            grid.append(fragment);
+        };
+
+        const setPackExpanded = (group, pack, expanded) => {
+            group.dataset.expanded = String(expanded);
+            const button = group.querySelector('.qlsm-pack-expand');
+            button?.setAttribute('aria-expanded', String(expanded));
+            button?.setAttribute('aria-label', `${expanded ? '收起' : '展开'} ${pack.label}`);
+            group.querySelector('.qlsm-pack-stickers')?.remove();
+            if (expanded) {
+                const grid = createElement('div', 'qlsm-pack-stickers');
+                grid.setAttribute('role', 'list');
+                renderPackStickerGrid(grid, pack);
+                group.append(grid);
+            }
+        };
+
         const renderPacks = packs => {
             packList.replaceChildren();
+            managerPacks = packs;
+            if (!packs.some(pack => pack.dirPath === expandedPackPath)) {
+                expandedPackPath = '';
+            }
             if (!packs.length) {
                 packList.append(createElement('div', 'qlsm-empty', '当前目录中没有可排序的贴纸集'));
                 saveOrder.disabled = true;
+                setStatus(packStatus, '0 个贴纸集');
                 return;
             }
             const fragment = document.createDocumentFragment();
             for (const pack of packs) {
+                const group = createElement('div', 'qlsm-pack-group');
+                group.dataset.packPath = pack.dirPath;
+                group.setAttribute('role', 'listitem');
                 const row = createElement('div', 'qlsm-pack-row');
-                row.dataset.packPath = pack.dirPath;
-                row.setAttribute('role', 'listitem');
                 const handle = createElement('button', 'qlsm-drag-handle');
                 handle.type = 'button';
                 handle.setAttribute('aria-label', `${pack.label} 拖动排序`);
-                const image = createElement('img', 'qlsm-pack-image');
-                image.alt = '';
-                image.src = localStickerFileUrl(pack.icon);
-                image.addEventListener('error', () => image.dataset.error = 'true', { once: true });
+                const media = createStickerMedia(pack.icon, 'qlsm-pack-image');
+                media.addEventListener('error', () => media.dataset.error = 'true', { once: true });
                 const details = createElement('div', 'qlsm-pack-details');
                 const name = createElement('div', 'qlsm-pack-name', pack.label);
                 const meta = createElement('div', 'qlsm-pack-meta', `${pack.count} 个贴纸`);
                 meta.title = pack.dirPath;
                 details.append(name, meta);
-                row.append(handle, image, details);
-                fragment.append(row);
+                const expand = createElement('button', 'qlsm-pack-expand');
+                expand.type = 'button';
+                expand.append(createElement('span', 'qlsm-pack-expand-icon'));
+                const deletePack = createElement('button', 'qlsm-pack-delete');
+                deletePack.type = 'button';
+                deletePack.dataset.deletePack = 'true';
+                deletePack.setAttribute('aria-label', `删除贴纸集 ${pack.label}`);
+                deletePack.title = '删除贴纸集';
+                deletePack.append(createTrashIcon());
+                const actions = createElement('div', 'qlsm-pack-actions');
+                actions.append(deletePack, expand);
+                row.append(handle, media, details, actions);
+                group.append(row);
+                setPackExpanded(group, pack, pack.dirPath === expandedPackPath);
+                fragment.append(group);
             }
             packList.append(fragment);
             saveOrder.disabled = true;
@@ -499,6 +599,134 @@ export function createLocalStickerManager(options = {}) {
                 }
             }
         };
+
+        const orderPacksByPaths = (packs, orderedPaths) => {
+            const byPath = new Map(packs.map(value => [value.dirPath, value]));
+            const ordered = orderedPaths.map(value => byPath.get(value)).filter(Boolean);
+            const known = new Set(orderedPaths);
+            for (const pack of packs) {
+                if (!known.has(pack.dirPath)) {
+                    ordered.push(pack);
+                }
+            }
+            return ordered;
+        };
+
+        const releaseVideoPreviews = stickerPaths => {
+            const paths = new Set(stickerPaths);
+            for (const video of layer.querySelectorAll('video[data-sticker-path]')) {
+                if (paths.has(video.dataset.stickerPath)) {
+                    video.pause();
+                    video.removeAttribute('src');
+                    video.load();
+                }
+            }
+        };
+
+        packList.addEventListener('click', async event => {
+            const deletePackButton = event.target.closest?.('.qlsm-pack-delete[data-delete-pack]');
+            const deletePackGroup = deletePackButton?.closest?.('.qlsm-pack-group[data-pack-path]');
+            const deletePack = managerPacks.find(value => value.dirPath === deletePackGroup?.dataset.packPath);
+            if (deletePackButton && deletePackGroup && deletePack && !deletePackButton.disabled) {
+                if (!window.confirm(`确定删除贴纸集“${deletePack.label}”及其中 ${deletePack.count} 个贴纸吗？`)) {
+                    return;
+                }
+                const orderDirty = !saveOrder.disabled;
+                const currentOrder = Array.from(packList.querySelectorAll('.qlsm-pack-group[data-pack-path]'))
+                    .map(value => value.dataset.packPath);
+                deletePackButton.disabled = true;
+                deletePackGroup.dataset.busy = 'true';
+                setStatus(packStatus, '正在删除贴纸集', 'pending');
+                releaseVideoPreviews(deletePack.stickers.map(sticker => sticker.path));
+                try {
+                    const result = await options.deletePack?.(
+                        deletePack.dirPath,
+                        deletePack.stickers.map(sticker => sticker.path)
+                    );
+                    if (result?.ok !== true) {
+                        throw new Error(result?.reason || '贴纸集删除失败');
+                    }
+                    if (expandedPackPath === deletePack.dirPath) {
+                        expandedPackPath = '';
+                    }
+                    renderPacks(orderPacksByPaths(
+                        normalizeLocalStickerManagerPacks(result.store),
+                        currentOrder
+                    ));
+                    saveOrder.disabled = !orderDirty;
+                    setStatus(
+                        packStatus,
+                        orderDirty ? `已删除 ${deletePack.label}；排序尚未保存` : `已删除 ${deletePack.label}`,
+                        orderDirty ? 'pending' : 'success'
+                    );
+                } catch (error) {
+                    renderPacks(orderPacksByPaths(managerPacks, currentOrder));
+                    saveOrder.disabled = !orderDirty;
+                    setStatus(packStatus, error?.message || '贴纸集删除失败', 'error');
+                }
+                return;
+            }
+
+            const button = event.target.closest?.('.qlsm-sticker-delete[data-delete-sticker]');
+            const item = button?.closest?.('.qlsm-sticker-item[data-sticker-path]');
+            if (button && item && !button.disabled) {
+                const group = item.closest('.qlsm-pack-group[data-pack-path]');
+                const pack = managerPacks.find(value => value.dirPath === group?.dataset.packPath);
+                const sticker = pack?.stickers.find(value => value.path === item.dataset.stickerPath);
+                if (!sticker || !window.confirm(`确定从磁盘删除“${sticker.label}”吗？`)) {
+                    return;
+                }
+                const orderDirty = !saveOrder.disabled;
+                const currentOrder = Array.from(packList.querySelectorAll('.qlsm-pack-group[data-pack-path]'))
+                    .map(value => value.dataset.packPath);
+                button.disabled = true;
+                group.dataset.busy = 'true';
+                setStatus(packStatus, '正在删除贴纸', 'pending');
+                releaseVideoPreviews([sticker.path]);
+                try {
+                    const result = await options.deleteSticker?.(sticker.path);
+                    if (result?.ok !== true) {
+                        throw new Error(result?.reason || '贴纸删除失败');
+                    }
+                    renderPacks(orderPacksByPaths(
+                        normalizeLocalStickerManagerPacks(result.store),
+                        currentOrder
+                    ));
+                    saveOrder.disabled = !orderDirty;
+                    setStatus(
+                        packStatus,
+                        orderDirty ? `已删除 ${sticker.label}；排序尚未保存` : `已删除 ${sticker.label}`,
+                        orderDirty ? 'pending' : 'success'
+                    );
+                } catch (error) {
+                    const grid = group.querySelector('.qlsm-pack-stickers');
+                    if (grid) {
+                        renderPackStickerGrid(grid, pack);
+                    }
+                    group.removeAttribute('data-busy');
+                    setStatus(packStatus, error?.message || '贴纸删除失败', 'error');
+                }
+                return;
+            }
+
+            const expandButton = event.target.closest?.('.qlsm-pack-expand');
+            const rowTarget = event.target.closest?.('.qlsm-pack-details, .qlsm-pack-image');
+            const group = (expandButton || rowTarget)?.closest?.('.qlsm-pack-group[data-pack-path]');
+            const pack = managerPacks.find(value => value.dirPath === group?.dataset.packPath);
+            if (!group || !pack) {
+                return;
+            }
+            const expanding = group.dataset.expanded !== 'true';
+            for (const other of packList.querySelectorAll('.qlsm-pack-group[data-expanded="true"]')) {
+                const otherPack = managerPacks.find(value => value.dirPath === other.dataset.packPath);
+                if (other !== group && otherPack) {
+                    setPackExpanded(other, otherPack, false);
+                }
+            }
+            expandedPackPath = expanding ? pack.dirPath : '';
+            setPackExpanded(group, pack, expanding);
+            group.scrollIntoView?.({ block: 'nearest' });
+        });
 
         openDirectory.addEventListener('click', async () => {
             openDirectory.disabled = true;
@@ -543,15 +771,15 @@ export function createLocalStickerManager(options = {}) {
             }
         });
 
-        const moveRow = (row, direction) => {
+        const moveRow = (group, direction) => {
             if (direction === 'up') {
-                row.previousElementSibling?.before(row);
+                group.previousElementSibling?.before(group);
             } else {
-                row.nextElementSibling?.after(row);
+                group.nextElementSibling?.after(group);
             }
             saveOrder.disabled = false;
             setStatus(packStatus, '排序尚未保存', 'pending');
-            row.scrollIntoView?.({ block: 'nearest' });
+            group.scrollIntoView?.({ block: 'nearest' });
         };
 
         const updatePointerDrag = clientY => {
@@ -560,17 +788,17 @@ export function createLocalStickerManager(options = {}) {
             }
             pointerDrag.clientY = clientY;
             pointerDrag.ghost.style.transform = `translate3d(0, ${clientY - pointerDrag.startY}px, 0)`;
-            const rows = Array.from(packList.querySelectorAll('.qlsm-pack-row'))
-                .filter(row => row !== pointerDrag.row);
-            const insertionIndex = getLocalStickerPackInsertionIndex(rows.map(row => {
-                const rect = row.getBoundingClientRect();
+            const groups = Array.from(packList.querySelectorAll('.qlsm-pack-group'))
+                .filter(group => group !== pointerDrag.group);
+            const insertionIndex = getLocalStickerPackInsertionIndex(groups.map(group => {
+                const rect = group.getBoundingClientRect();
                 return rect.top + rect.height / 2;
             }), clientY);
-            const target = rows[insertionIndex] || null;
-            if (target && pointerDrag.row.nextElementSibling !== target) {
-                packList.insertBefore(pointerDrag.row, target);
-            } else if (!target && pointerDrag.row !== packList.lastElementChild) {
-                packList.append(pointerDrag.row);
+            const target = groups[insertionIndex] || null;
+            if (target && pointerDrag.group.nextElementSibling !== target) {
+                packList.insertBefore(pointerDrag.group, target);
+            } else if (!target && pointerDrag.group !== packList.lastElementChild) {
+                packList.append(pointerDrag.group);
             }
         };
 
@@ -598,6 +826,13 @@ export function createLocalStickerManager(options = {}) {
             if (!pointerDrag || pointerDrag.started) {
                 return;
             }
+            for (const group of packList.querySelectorAll('.qlsm-pack-group[data-expanded="true"]')) {
+                const pack = managerPacks.find(value => value.dirPath === group.dataset.packPath);
+                if (pack) {
+                    setPackExpanded(group, pack, false);
+                }
+            }
+            expandedPackPath = '';
             const rect = pointerDrag.row.getBoundingClientRect();
             const ghost = pointerDrag.row.cloneNode(true);
             ghost.classList.add('qlsm-drag-ghost');
@@ -612,7 +847,7 @@ export function createLocalStickerManager(options = {}) {
             layer.append(ghost);
             pointerDrag.started = true;
             pointerDrag.ghost = ghost;
-            pointerDrag.row.dataset.dragging = 'true';
+            pointerDrag.group.dataset.dragging = 'true';
             packList.dataset.dragging = 'true';
             autoScrollFrame = requestAnimationFrame(runAutoScroll);
         };
@@ -629,7 +864,7 @@ export function createLocalStickerManager(options = {}) {
                 autoScrollFrame = 0;
             }
             drag.ghost?.remove();
-            drag.row.removeAttribute('data-dragging');
+            drag.group.removeAttribute('data-dragging');
             packList.removeAttribute('data-dragging');
             if (drag.started) {
                 saveOrder.disabled = false;
@@ -640,13 +875,15 @@ export function createLocalStickerManager(options = {}) {
         packList.addEventListener('pointerdown', event => {
             const handle = event.target.closest?.('.qlsm-drag-handle');
             const row = handle?.closest?.('.qlsm-pack-row');
-            if (!handle || !row || event.button !== 0 || pointerDrag) {
+            const group = row?.closest?.('.qlsm-pack-group');
+            if (!handle || !row || !group || event.button !== 0 || pointerDrag) {
                 return;
             }
             pointerDrag = {
                 pointerId: event.pointerId,
                 handle,
                 row,
+                group,
                 startX: event.clientX,
                 startY: event.clientY,
                 clientY: event.clientY,
@@ -684,11 +921,12 @@ export function createLocalStickerManager(options = {}) {
         packList.addEventListener('keydown', event => {
             const handle = event.target.closest?.('.qlsm-drag-handle');
             const row = handle?.closest?.('.qlsm-pack-row');
-            if (!handle || !row || !['ArrowUp', 'ArrowDown'].includes(event.key)) {
+            const group = row?.closest?.('.qlsm-pack-group');
+            if (!handle || !group || !['ArrowUp', 'ArrowDown'].includes(event.key)) {
                 return;
             }
             event.preventDefault();
-            moveRow(row, event.key === 'ArrowUp' ? 'up' : 'down');
+            moveRow(group, event.key === 'ArrowUp' ? 'up' : 'down');
             handle.focus({ preventScroll: true });
         });
 
@@ -697,8 +935,8 @@ export function createLocalStickerManager(options = {}) {
             saveOrder.disabled = true;
             setStatus(packStatus, '正在保存排序', 'pending');
             try {
-                const packPaths = Array.from(packList.querySelectorAll('.qlsm-pack-row[data-pack-path]'))
-                    .map(row => row.dataset.packPath)
+                const packPaths = Array.from(packList.querySelectorAll('.qlsm-pack-group[data-pack-path]'))
+                    .map(group => group.dataset.packPath)
                     .filter(Boolean);
                 const result = await options.saveOrder?.(packPaths);
                 if (result?.ok !== true) {

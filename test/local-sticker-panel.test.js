@@ -9,6 +9,14 @@ const source = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'local-sticker-panel.js'),
     'utf8'
 );
+const style = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'local-sticker-panel.css'),
+    'utf8'
+);
+const mainSource = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'main.js'),
+    'utf8'
+);
 
 test('supports the three mutually exclusive local sticker entry modes', () => {
     assert.match(source, /new Set\(\['contextmenu', 'replace', 'separate'\]\)/);
@@ -36,6 +44,21 @@ test('inserts local stickers into both QQ editor implementations', () => {
     assert.match(source, /function isDirectSendGesture\(config, event\)/);
     assert.match(source, /config\.directSendMode === 'click' \? !event\.altKey : event\.altKey/);
     assert.match(source, /if \(isDirectSendGesture\(config, event\)\)/);
+});
+
+test('previews and sends WebM stickers without converting them to images', () => {
+    assert.match(source, /document\.createElement\(isVideoStickerPath\(filePath\) \? 'video' : 'img'\)/);
+    assert.match(source, /media\.muted = true/);
+    assert.match(source, /media\.loop = true/);
+    assert.match(source, /new File\(\[blob\], fileName/);
+    assert.match(source, /\['dragenter', 'dragover', 'drop'\]/);
+    assert.match(style, /\.qls-sticker video/);
+    assert.match(style, /\.qls-pack video/);
+    assert.match(mainSource, /path\.extname\(stickerPath\)\.toLowerCase\(\) === '\.webm'/);
+    assert.match(mainSource, /await createVideoElement\(browserWindow, stickerPath/);
+    assert.match(mainSource, /ffmpegArgs\.push\('-c:v', 'libvpx-vp9'\)/);
+    assert.match(source, /function releasePreview\(filePath\)/);
+    assert.match(source, /video\.removeAttribute\('src'\)/);
 });
 
 test('direct-sends only image-style items from QQ non-default emoji panels with the selected gesture', () => {

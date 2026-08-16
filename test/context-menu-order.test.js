@@ -214,6 +214,7 @@ test('ships both QQ native and Toolbox entries in the initial editor catalog', a
     assert.ok(ids.has('qq:复制'));
     assert.ok(ids.has('qq:转发'));
     assert.ok(ids.has('toolbox:repeat'));
+    assert.ok(ids.has('toolbox:message-pull'));
     assert.ok(ids.has('toolbox:message-to-image'));
     assert.ok(ids.has('toolbox:voice-save'));
     assert.ok(ids.has('toolbox:qr-scan'));

@@ -121,7 +121,8 @@
     outline-offset: -2px;
 }
 
-.qls-sticker img {
+.qls-sticker img,
+.qls-sticker video {
     display: block;
     width: 100%;
     height: 100%;
@@ -131,7 +132,8 @@
     transition: opacity 120ms ease;
 }
 
-.qls-sticker[data-loaded="true"] img {
+.qls-sticker[data-loaded="true"] img,
+.qls-sticker[data-loaded="true"] video {
     opacity: 1;
 }
 
@@ -146,7 +148,8 @@
     color: var(--qls-muted);
 }
 
-.qls-sticker[data-error="true"] img {
+.qls-sticker[data-error="true"] img,
+.qls-sticker[data-error="true"] video {
     display: none;
 }
 
@@ -258,7 +261,8 @@
     background: var(--qls-accent);
 }
 
-.qls-pack img {
+.qls-pack img,
+.qls-pack video {
     display: block;
     width: 100%;
     height: 100%;
@@ -266,7 +270,7 @@
     pointer-events: none;
 }
 
-.qls-pack:not(:has(img))::before {
+.qls-pack:not(:has(img, video))::before {
     content: attr(data-fallback);
     font-size: 12px;
     font-weight: 600;
@@ -298,7 +302,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .qls-sticker img {
+    .qls-sticker img,
+    .qls-sticker video {
         transition: none;
     }
 

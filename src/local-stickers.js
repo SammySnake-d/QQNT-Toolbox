@@ -5,7 +5,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 
-const SUPPORTED_STICKER_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+const SUPPORTED_STICKER_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.webm']);
 const LOCAL_STICKER_ENTRY_MODES = new Set(['contextmenu', 'replace', 'separate']);
 const LOCAL_STICKER_DIRECT_SEND_MODES = new Set(['alt', 'click']);
 const RECENT_STICKERS_FILE = 'recentStickers.json';
@@ -361,6 +361,95 @@ async function rememberRecentSticker(rootPath, candidatePath, maximum = 60) {
         : { ok: false, reason: 'recent-history-write-failed', paths: next };
 }
 
+async function deleteLocalSticker(rootPath, candidatePath) {
+    const configuredRoot = String(rootPath || '').trim();
+    const candidate = String(candidatePath || '').trim();
+    if (!configuredRoot || !candidate || !isSupportedStickerPath(candidate)) {
+        return { ok: false, reason: 'invalid-sticker-path' };
+    }
+    let root;
+    let filePath;
+    try {
+        root = await fs.realpath(path.resolve(configuredRoot));
+        const absoluteCandidate = path.resolve(candidate);
+        const stat = await fs.lstat(absoluteCandidate);
+        if (!stat.isFile() || stat.isSymbolicLink()) {
+            return { ok: false, reason: 'invalid-sticker-path' };
+        }
+        filePath = await fs.realpath(absoluteCandidate);
+        if (!isPathInside(root, filePath)) {
+            return { ok: false, reason: 'invalid-sticker-path' };
+        }
+        await fs.unlink(absoluteCandidate);
+    } catch {
+        return { ok: false, reason: 'delete-failed' };
+    }
+
+    const current = await readRecentStickerPaths(root);
+    const deletedKey = normalizePathKey(filePath);
+    const next = current.filter(value => normalizePathKey(value) !== deletedKey);
+    if (next.length !== current.length) {
+        await writeRecentStickerPaths(root, next);
+    }
+    return { ok: true };
+}
+
+async function deleteLocalStickerPack(rootPath, candidatePackPath) {
+    const configuredRoot = String(rootPath || '').trim();
+    const candidate = String(candidatePackPath || '').trim();
+    if (!configuredRoot || !candidate) {
+        return { ok: false, reason: 'invalid-sticker-pack' };
+    }
+    const scanResult = await scanLocalStickerPacks(configuredRoot);
+    if (scanResult.status !== 'success') {
+        return { ok: false, reason: 'invalid-sticker-pack' };
+    }
+    const packKey = normalizePathKey(path.resolve(candidate));
+    const pack = scanResult.stickerPacks.find(value => normalizePathKey(value.dirPath) === packKey);
+    if (!pack || !isPathInside(scanResult.rootPath, pack.dirPath)) {
+        return { ok: false, reason: 'invalid-sticker-pack' };
+    }
+
+    const deletedPaths = [];
+    let deletionFailed = false;
+    try {
+        for (const sticker of pack.stickers) {
+            const stickerPath = await resolveLocalStickerPath(scanResult.rootPath, sticker.path);
+            if (!stickerPath || path.dirname(stickerPath) !== pack.dirPath) {
+                throw new Error('invalid sticker path');
+            }
+            await fs.unlink(stickerPath);
+            deletedPaths.push(stickerPath);
+        }
+        const metadataPath = path.join(pack.dirPath, 'sticker.json');
+        try {
+            const metadataStat = await fs.lstat(metadataPath);
+            if (metadataStat.isFile() && !metadataStat.isSymbolicLink()) {
+                await fs.unlink(metadataPath);
+            }
+        } catch (error) {
+            if (error?.code !== 'ENOENT') {
+                throw error;
+            }
+        }
+        if (normalizePathKey(pack.dirPath) !== normalizePathKey(scanResult.rootPath)) {
+            await fs.rmdir(pack.dirPath).catch(() => {});
+        }
+    } catch {
+        deletionFailed = true;
+    }
+
+    const deletedKeys = new Set(deletedPaths.map(normalizePathKey));
+    const recent = await readRecentStickerPaths(scanResult.rootPath);
+    const nextRecent = recent.filter(value => !deletedKeys.has(normalizePathKey(value)));
+    if (nextRecent.length !== recent.length) {
+        await writeRecentStickerPaths(scanResult.rootPath, nextRecent);
+    }
+    return deletionFailed
+        ? { ok: false, reason: 'delete-failed', deleted: deletedPaths.length }
+        : { ok: true, deleted: deletedPaths.length };
+}
+
 async function writeJsonAtomic(filePath, value) {
     const temporaryPath = path.join(
         path.dirname(filePath),
@@ -444,6 +533,8 @@ module.exports = {
     RECENT_STICKERS_FILE,
     SUPPORTED_STICKER_EXTENSIONS,
     buildLocalStickerStore,
+    deleteLocalSticker,
+    deleteLocalStickerPack,
     isPathInside,
     isSupportedStickerPath,
     normalizeLocalStickerConfig,

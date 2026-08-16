@@ -21,10 +21,14 @@ const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
 const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
 const CHANNEL_SEND_FAKE_FORWARD = 'qqnt-toolbox:send-fake-forward';
+const CHANNEL_SEND_MESSAGE_PACKET = 'qqnt-toolbox:send-message-packet';
+const CHANNEL_PULL_MESSAGE_PACKET = 'qqnt-toolbox:pull-message-packet';
 const CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY = 'qqnt-toolbox:choose-local-sticker-directory';
 const CHANNEL_GET_LOCAL_STICKERS = 'qqnt-toolbox:get-local-stickers';
 const CHANNEL_REMEMBER_LOCAL_STICKER = 'qqnt-toolbox:remember-local-sticker';
 const CHANNEL_SEND_LOCAL_STICKER = 'qqnt-toolbox:send-local-sticker';
+const CHANNEL_DELETE_LOCAL_STICKER = 'qqnt-toolbox:delete-local-sticker';
+const CHANNEL_DELETE_LOCAL_STICKER_PACK = 'qqnt-toolbox:delete-local-sticker-pack';
 const CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY = 'qqnt-toolbox:open-local-sticker-directory';
 const CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER = 'qqnt-toolbox:update-local-sticker-pack-order';
 const CHANNEL_CHOOSE_LOCAL_STICKER_TOOL = 'qqnt-toolbox:choose-local-sticker-tool';
@@ -64,10 +68,14 @@ contextBridge.exposeInMainWorld('qqnt_toolbox', {
     resolveFakeForwardSenderName: senderUin =>
         ipcRenderer.invoke(CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME, senderUin),
     sendFakeForward: payload => ipcRenderer.invoke(CHANNEL_SEND_FAKE_FORWARD, payload),
+    sendMessagePacket: payload => ipcRenderer.invoke(CHANNEL_SEND_MESSAGE_PACKET, payload),
+    pullMessagePacket: payload => ipcRenderer.invoke(CHANNEL_PULL_MESSAGE_PACKET, payload),
     chooseLocalStickerDirectory: () => ipcRenderer.invoke(CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY),
     getLocalStickers: options => ipcRenderer.invoke(CHANNEL_GET_LOCAL_STICKERS, options),
     rememberLocalSticker: filePath => ipcRenderer.invoke(CHANNEL_REMEMBER_LOCAL_STICKER, filePath),
     sendLocalSticker: payload => ipcRenderer.invoke(CHANNEL_SEND_LOCAL_STICKER, payload),
+    deleteLocalSticker: filePath => ipcRenderer.invoke(CHANNEL_DELETE_LOCAL_STICKER, filePath),
+    deleteLocalStickerPack: packPath => ipcRenderer.invoke(CHANNEL_DELETE_LOCAL_STICKER_PACK, packPath),
     openLocalStickerDirectory: () => ipcRenderer.invoke(CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY),
     updateLocalStickerPackOrder: packPaths =>
         ipcRenderer.invoke(CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER, packPaths),

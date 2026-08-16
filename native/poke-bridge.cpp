@@ -9,17 +9,22 @@
 struct napi_env__;
 struct napi_value__;
 struct napi_callback_info__;
+struct napi_deferred__;
+struct napi_handle_scope__;
 
 using napi_env = napi_env__*;
 using napi_value = napi_value__*;
 using napi_callback_info = napi_callback_info__*;
+using napi_deferred = napi_deferred__*;
+using napi_handle_scope = napi_handle_scope__*;
 using napi_callback = napi_value(__cdecl*)(napi_env, napi_callback_info);
 using napi_status = int;
 
 namespace {
 
 constexpr napi_status NAPI_OK = 0;
-constexpr std::size_t PATCH_SIZE = 15;
+constexpr std::size_t CONVERT_PATCH_SIZE = 15;
+constexpr std::size_t RECEIVE_PATCH_SIZE = 18;
 constexpr std::size_t SIGNATURE_SIZE = 48;
 
 using NapiCreateFunction = napi_status(__cdecl*)(
@@ -30,6 +35,14 @@ using NapiIsBuffer = napi_status(__cdecl*)(napi_env, napi_value, bool*);
 using NapiGetBufferInfo = napi_status(__cdecl*)(napi_env, napi_value, void**, std::size_t*);
 using NapiCreateStringLatin1 = napi_status(__cdecl*)(
     napi_env, const char*, std::size_t, napi_value*);
+using NapiCreateStringUtf8 = napi_status(__cdecl*)(
+    napi_env, const char*, std::size_t, napi_value*);
+using NapiCreateObject = napi_status(__cdecl*)(napi_env, napi_value*);
+using NapiCreateBufferCopy = napi_status(__cdecl*)(
+    napi_env, std::size_t, const void*, void**, napi_value*);
+using NapiOpenHandleScope = napi_status(__cdecl*)(napi_env, napi_handle_scope*);
+using NapiCloseHandleScope = napi_status(__cdecl*)(napi_env, napi_handle_scope);
+using NapiResolveDeferred = napi_status(__cdecl*)(napi_env, napi_deferred, napi_value);
 using NapiGetCallbackInfo = napi_status(__cdecl*)(
     napi_env, napi_callback_info, std::size_t*, napi_value*, napi_value*, void**);
 using NapiGetValueInt32 = napi_status(__cdecl*)(napi_env, napi_value, std::int32_t*);
@@ -41,6 +54,12 @@ struct NapiApi {
     NapiIsBuffer isBuffer = nullptr;
     NapiGetBufferInfo getBufferInfo = nullptr;
     NapiCreateStringLatin1 createStringLatin1 = nullptr;
+    NapiCreateStringUtf8 createStringUtf8 = nullptr;
+    NapiCreateObject createObject = nullptr;
+    NapiCreateBufferCopy createBufferCopy = nullptr;
+    NapiOpenHandleScope openHandleScope = nullptr;
+    NapiCloseHandleScope closeHandleScope = nullptr;
+    NapiResolveDeferred resolveDeferred = nullptr;
     NapiGetCallbackInfo getCallbackInfo = nullptr;
     NapiGetValueInt32 getValueInt32 = nullptr;
 };
@@ -52,16 +71,21 @@ struct InternalString {
 };
 
 using ConvertValue = InternalString*(__fastcall*)(InternalString*, napi_env, napi_value);
+using ReceiveValue = void(__fastcall*)(void*);
+using SetOriginalHook = void(__cdecl*)(void*);
 
 NapiApi g_napi;
 ConvertValue g_originalConvert = nullptr;
-std::uint8_t* g_target = nullptr;
+ReceiveValue g_originalReceive = nullptr;
+std::uint8_t* g_convertTarget = nullptr;
+std::uint8_t* g_receiveTarget = nullptr;
 volatile LONG g_conversionArmed = 0;
 HWND g_moveWindow = nullptr;
 RECT g_moveOrigin = {};
 UINT g_moveDpi = USER_DEFAULT_SCREEN_DPI;
 
 constexpr std::size_t MAX_INTERCEPTED_BUFFER_SIZE = 4096;
+constexpr std::size_t MAX_INTERCEPTED_RESPONSE_SIZE = 0xFFFFFF;
 
 struct SuspendedThread {
     HANDLE handle;
@@ -74,6 +98,15 @@ constexpr std::uint8_t EXPECTED_SIGNATURE[SIGNATURE_SIZE] = {
     0x89, 0xC7, 0x48, 0x89, 0xD6, 0x49, 0x89, 0xCE,
     0x48, 0x8D, 0x5D, 0xCC, 0x83, 0x23, 0x00, 0x48,
     0x89, 0xD1, 0x4C, 0x89, 0xC2, 0x49, 0x89, 0xD8
+};
+
+constexpr std::uint8_t EXPECTED_RECEIVE_SIGNATURE[SIGNATURE_SIZE] = {
+    0x41, 0x57, 0x41, 0x56, 0x56, 0x57, 0x53, 0x48,
+    0x83, 0xEC, 0x70, 0x48, 0x8B, 0x05, 0x25, 0x3E,
+    0x6D, 0x03, 0x48, 0x31, 0xE0, 0x48, 0x89, 0x44,
+    0x24, 0x68, 0x4C, 0x8B, 0x79, 0x10, 0x49, 0x83,
+    0x7F, 0x20, 0x00, 0x0F, 0x84, 0xA4, 0x01, 0x00,
+    0x00, 0x48, 0x89, 0xCF, 0x49, 0x8B, 0x77, 0x18
 };
 
 template <typename T>
@@ -90,11 +123,19 @@ bool resolveNapiApi() {
     g_napi.getBufferInfo = resolveNapi<NapiGetBufferInfo>("napi_get_buffer_info");
     g_napi.createStringLatin1 =
         resolveNapi<NapiCreateStringLatin1>("napi_create_string_latin1");
+    g_napi.createStringUtf8 = resolveNapi<NapiCreateStringUtf8>("napi_create_string_utf8");
+    g_napi.createObject = resolveNapi<NapiCreateObject>("napi_create_object");
+    g_napi.createBufferCopy = resolveNapi<NapiCreateBufferCopy>("napi_create_buffer_copy");
+    g_napi.openHandleScope = resolveNapi<NapiOpenHandleScope>("napi_open_handle_scope");
+    g_napi.closeHandleScope = resolveNapi<NapiCloseHandleScope>("napi_close_handle_scope");
+    g_napi.resolveDeferred = resolveNapi<NapiResolveDeferred>("napi_resolve_deferred");
     g_napi.getCallbackInfo = resolveNapi<NapiGetCallbackInfo>("napi_get_cb_info");
     g_napi.getValueInt32 = resolveNapi<NapiGetValueInt32>("napi_get_value_int32");
-    return g_napi.createFunction && g_napi.setNamedProperty && g_napi.createInt32 && g_napi.isBuffer &&
-        g_napi.getBufferInfo && g_napi.createStringLatin1 && g_napi.getCallbackInfo &&
-        g_napi.getValueInt32;
+    return g_napi.createFunction && g_napi.setNamedProperty && g_napi.createInt32 &&
+        g_napi.isBuffer && g_napi.getBufferInfo && g_napi.createStringLatin1 &&
+        g_napi.createStringUtf8 && g_napi.createObject && g_napi.createBufferCopy &&
+        g_napi.openHandleScope && g_napi.closeHandleScope && g_napi.resolveDeferred &&
+        g_napi.getCallbackInfo && g_napi.getValueInt32;
 }
 
 bool getModuleSize(HMODULE module, std::uint32_t& size) {
@@ -115,7 +156,11 @@ bool getModuleSize(HMODULE module, std::uint32_t& size) {
     return size > 0;
 }
 
-std::uint8_t* findUniqueConvertTarget(HMODULE module, std::uint32_t imageSize) {
+std::uint8_t* findUniqueFunctionTarget(
+    HMODULE module,
+    std::uint32_t imageSize,
+    const std::uint8_t* signature,
+    std::size_t signatureSize) {
     const auto* base = reinterpret_cast<const std::uint8_t*>(module);
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
     const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
@@ -131,12 +176,12 @@ std::uint8_t* findUniqueConvertTarget(HMODULE module, std::uint32_t imageSize) {
     for (std::size_t index = 0; index < count; index += 1) {
         const auto& function = functions[index];
         if (function.EndAddress <= function.BeginAddress || function.EndAddress > imageSize ||
-            function.BeginAddress > imageSize - SIGNATURE_SIZE ||
-            function.EndAddress - function.BeginAddress < SIGNATURE_SIZE) {
+            function.BeginAddress > imageSize - signatureSize ||
+            function.EndAddress - function.BeginAddress < signatureSize) {
             continue;
         }
         auto* candidate = const_cast<std::uint8_t*>(base + function.BeginAddress);
-        if (std::memcmp(candidate, EXPECTED_SIGNATURE, SIGNATURE_SIZE) != 0) {
+        if (std::memcmp(candidate, signature, signatureSize) != 0) {
             continue;
         }
         if (found) {
@@ -160,7 +205,8 @@ std::size_t suspendOtherThreads(
     SuspendedThread* suspended,
     std::size_t capacity,
     const std::uint8_t* target,
-    const std::uint8_t* trampoline) {
+    const std::uint8_t* trampoline,
+    std::size_t patchSize) {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
         return static_cast<std::size_t>(-1);
@@ -196,7 +242,7 @@ std::size_t suspendOtherThreads(
                 continue;
             }
             const auto instruction = reinterpret_cast<const std::uint8_t*>(context.Rip);
-            if (instruction >= target && instruction < target + PATCH_SIZE) {
+            if (instruction >= target && instruction < target + patchSize) {
                 context.Rip = reinterpret_cast<DWORD64>(
                     trampoline + (instruction - target));
                 if (!SetThreadContext(thread, &context)) {
@@ -276,8 +322,161 @@ InternalString* __fastcall convertValueHook(
     return converted;
 }
 
+bool getInternalStringView(
+    const InternalString* value,
+    const std::uint8_t*& data,
+    std::size_t& length) {
+    if (!value) {
+        return false;
+    }
+    const auto tag = *reinterpret_cast<const std::uint8_t*>(value);
+    if ((tag & 1) != 0) {
+        length = static_cast<std::size_t>(value->size);
+        data = value->data;
+    } else {
+        length = static_cast<std::size_t>(tag >> 1);
+        data = reinterpret_cast<const std::uint8_t*>(value) + 1;
+    }
+    return length == 0 || data != nullptr;
+}
+
+void __fastcall receiveValueHook(void* response) {
+    if (!response) {
+        return;
+    }
+    auto* responseBytes = static_cast<std::uint8_t*>(response);
+    auto* context = *reinterpret_cast<std::uint8_t**>(responseBytes + 0x10);
+    if (!context) {
+        return;
+    }
+    auto env = *reinterpret_cast<napi_env*>(context + 0x18);
+    auto deferred = *reinterpret_cast<napi_deferred*>(context + 0x20);
+    if (!env || !deferred) {
+        return;
+    }
+
+    const std::uint8_t* errorData = nullptr;
+    std::size_t errorLength = 0;
+    const std::uint8_t* responseData = nullptr;
+    std::size_t responseLength = 0;
+    if (!getInternalStringView(
+            reinterpret_cast<const InternalString*>(responseBytes + 0x20),
+            errorData,
+            errorLength) ||
+        !getInternalStringView(
+            reinterpret_cast<const InternalString*>(responseBytes + 0x38),
+            responseData,
+            responseLength) ||
+        responseLength >= MAX_INTERCEPTED_RESPONSE_SIZE) {
+        g_originalReceive(response);
+        return;
+    }
+
+    napi_handle_scope scope = nullptr;
+    if (g_napi.openHandleScope(env, &scope) != NAPI_OK || !scope) {
+        g_originalReceive(response);
+        return;
+    }
+
+    napi_value result = nullptr;
+    napi_value resultCode = nullptr;
+    napi_value errorMessage = nullptr;
+    napi_value responseString = nullptr;
+    napi_value responseBuffer = nullptr;
+    const auto code = *reinterpret_cast<const std::int32_t*>(responseBytes + 0x18);
+    const bool created =
+        g_napi.createObject(env, &result) == NAPI_OK && result &&
+        g_napi.createInt32(env, code, &resultCode) == NAPI_OK && resultCode &&
+        g_napi.setNamedProperty(env, result, "result", resultCode) == NAPI_OK &&
+        g_napi.createStringUtf8(
+            env,
+            reinterpret_cast<const char*>(errorData),
+            errorLength,
+            &errorMessage) == NAPI_OK && errorMessage &&
+        g_napi.setNamedProperty(env, result, "errMsg", errorMessage) == NAPI_OK &&
+        g_napi.createStringUtf8(
+            env,
+            reinterpret_cast<const char*>(responseData),
+            responseLength,
+            &responseString) == NAPI_OK && responseString &&
+        g_napi.createBufferCopy(
+            env,
+            responseLength,
+            responseData,
+            nullptr,
+            &responseBuffer) == NAPI_OK && responseBuffer &&
+        g_napi.setNamedProperty(env, result, "rspbuffer", responseBuffer) == NAPI_OK &&
+        g_napi.setNamedProperty(env, result, "rsp", responseString) == NAPI_OK;
+
+    const napi_status resolveStatus = created
+        ? g_napi.resolveDeferred(env, deferred, result)
+        : -1;
+    g_napi.closeHandleScope(env, scope);
+    if (resolveStatus == NAPI_OK) {
+        *reinterpret_cast<napi_deferred*>(context + 0x20) = nullptr;
+        return;
+    }
+    g_originalReceive(response);
+}
+
+void __cdecl setOriginalConvertHook(void* original) {
+    g_originalConvert = reinterpret_cast<ConvertValue>(original);
+}
+
+void __cdecl setOriginalReceiveHook(void* original) {
+    g_originalReceive = reinterpret_cast<ReceiveValue>(original);
+}
+
+int installInlineHook(
+    std::uint8_t* target,
+    std::size_t patchSize,
+    const void* hook,
+    SetOriginalHook setOriginal) {
+    const std::size_t trampolineSize = patchSize + 12;
+    auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
+        nullptr,
+        trampolineSize,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE));
+    if (!trampoline) {
+        return -6;
+    }
+    std::memcpy(trampoline, target, patchSize);
+    writeAbsoluteJump(trampoline + patchSize, target + patchSize);
+    setOriginal(trampoline);
+
+    SuspendedThread suspended[1024] = {};
+    const std::size_t suspendedCount = suspendOtherThreads(
+        suspended,
+        sizeof(suspended) / sizeof(suspended[0]),
+        target,
+        trampoline,
+        patchSize);
+    if (suspendedCount == static_cast<std::size_t>(-1)) {
+        setOriginal(nullptr);
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return -7;
+    }
+
+    DWORD oldProtection = 0;
+    if (!VirtualProtect(target, patchSize, PAGE_EXECUTE_READWRITE, &oldProtection)) {
+        resumeThreads(suspended, suspendedCount);
+        setOriginal(nullptr);
+        VirtualFree(trampoline, 0, MEM_RELEASE);
+        return -8;
+    }
+    writeAbsoluteJump(target, hook);
+    std::memset(target + 12, 0x90, patchSize - 12);
+    FlushInstructionCache(GetCurrentProcess(), target, patchSize);
+    DWORD ignored = 0;
+    VirtualProtect(target, patchSize, oldProtection, &ignored);
+    resumeThreads(suspended, suspendedCount);
+    return 1;
+}
+
 int installHook() {
-    if (g_target) {
+    const bool alreadyInstalled = g_convertTarget && g_receiveTarget;
+    if (alreadyInstalled) {
         return 2;
     }
     HMODULE wrapper = GetModuleHandleW(L"wrapper.node");
@@ -289,52 +488,45 @@ int installHook() {
         return -4;
     }
 
-    auto* target = findUniqueConvertTarget(wrapper, imageSize);
-    if (!target) {
+    auto* convertTarget = g_convertTarget ? g_convertTarget : findUniqueFunctionTarget(
+        wrapper,
+        imageSize,
+        EXPECTED_SIGNATURE,
+        SIGNATURE_SIZE);
+    if (!convertTarget) {
         return -5;
     }
-
-    constexpr std::size_t trampolineSize = PATCH_SIZE + 12;
-    auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
-        nullptr,
-        trampolineSize,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_EXECUTE_READWRITE));
-    if (!trampoline) {
-        return -6;
-    }
-    std::memcpy(trampoline, target, PATCH_SIZE);
-    writeAbsoluteJump(trampoline + PATCH_SIZE, target + PATCH_SIZE);
-
-    g_originalConvert = reinterpret_cast<ConvertValue>(trampoline);
-
-    SuspendedThread suspended[1024] = {};
-    const std::size_t suspendedCount = suspendOtherThreads(
-        suspended,
-        sizeof(suspended) / sizeof(suspended[0]),
-        target,
-        trampoline);
-    if (suspendedCount == static_cast<std::size_t>(-1)) {
-        g_originalConvert = nullptr;
-        VirtualFree(trampoline, 0, MEM_RELEASE);
-        return -7;
+    auto* receiveTarget = g_receiveTarget ? g_receiveTarget : findUniqueFunctionTarget(
+        wrapper,
+        imageSize,
+        EXPECTED_RECEIVE_SIGNATURE,
+        SIGNATURE_SIZE);
+    if (!receiveTarget) {
+        return -9;
     }
 
-    DWORD oldProtection = 0;
-    if (!VirtualProtect(target, PATCH_SIZE, PAGE_EXECUTE_READWRITE, &oldProtection)) {
-        resumeThreads(suspended, suspendedCount);
-        g_originalConvert = nullptr;
-        VirtualFree(trampoline, 0, MEM_RELEASE);
-        return -8;
+    if (!g_convertTarget) {
+        const int result = installInlineHook(
+            convertTarget,
+            CONVERT_PATCH_SIZE,
+            reinterpret_cast<const void*>(&convertValueHook),
+            setOriginalConvertHook);
+        if (result < 0) {
+            return result;
+        }
+        g_convertTarget = convertTarget;
     }
-    writeAbsoluteJump(target, reinterpret_cast<const void*>(&convertValueHook));
-    std::memset(target + 12, 0x90, PATCH_SIZE - 12);
-    FlushInstructionCache(GetCurrentProcess(), target, PATCH_SIZE);
-    DWORD ignored = 0;
-    VirtualProtect(target, PATCH_SIZE, oldProtection, &ignored);
-    resumeThreads(suspended, suspendedCount);
-
-    g_target = target;
+    if (!g_receiveTarget) {
+        const int result = installInlineHook(
+            receiveTarget,
+            RECEIVE_PATCH_SIZE,
+            reinterpret_cast<const void*>(&receiveValueHook),
+            setOriginalReceiveHook);
+        if (result < 0) {
+            return result - 10;
+        }
+        g_receiveTarget = receiveTarget;
+    }
     return 1;
 }
 

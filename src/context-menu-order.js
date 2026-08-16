@@ -41,6 +41,7 @@ const MESSAGE_MENU_PROVIDER_PROPERTIES = Object.freeze([
 
 export const DEFAULT_MESSAGE_CONTEXT_MENU_ITEMS = Object.freeze([
     { id: 'qq:复制', label: '复制' },
+    { id: 'toolbox:message-pull', label: '拉取', toolbox: true },
     { id: 'toolbox:message-to-image', label: '转图', toolbox: true },
     { id: 'qq:转发', label: '转发' },
     { id: 'toolbox:repeat', label: '复读', toolbox: true },

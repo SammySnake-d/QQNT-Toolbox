@@ -127,6 +127,9 @@ try {
         'QQNT-Toolbox/src/media-player-icons/README.txt',
         'QQNT-Toolbox/src/fake-forward-editor.css',
         'QQNT-Toolbox/src/fake-forward-editor.js',
+        'QQNT-Toolbox/src/message-packet.js',
+        'QQNT-Toolbox/src/message-packet-editor.css',
+        'QQNT-Toolbox/src/message-packet-editor.js',
         'QQNT-Toolbox/src/chat-toolbar-entry.js',
         'QQNT-Toolbox/src/local-stickers.js',
         'QQNT-Toolbox/src/local-sticker-downloader.js',
@@ -197,9 +200,17 @@ finally {
     $archive.Dispose()
 }
 
-$hash = Get-FileHash -LiteralPath $assetPath -Algorithm SHA256
+$sha256 = [Security.Cryptography.SHA256]::Create()
+$assetStream = [IO.File]::OpenRead($assetPath)
+try {
+    $hash = [BitConverter]::ToString($sha256.ComputeHash($assetStream)).Replace('-', '')
+}
+finally {
+    $assetStream.Dispose()
+    $sha256.Dispose()
+}
 [PSCustomObject]@{
     Asset = $assetPath
     Size = (Get-Item -LiteralPath $assetPath).Length
-    SHA256 = $hash.Hash
+    SHA256 = $hash
 }

@@ -136,8 +136,89 @@
 
 #qqnt-toolbox-local-sticker-manager .qlsm-pack-pane {
     display: grid;
-    grid-template-rows: auto auto minmax(0, 1fr) 54px;
+    grid-template-rows: auto minmax(0, 1fr) 54px;
     height: 100%;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-stickers {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+    align-content: start;
+    min-width: 0;
+    gap: 8px;
+    padding: 10px 10px 14px 82px;
+    border-top: 1px solid var(--qlsm-border);
+    background: color-mix(in srgb, var(--qlsm-fill) 45%, transparent);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-item {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-width: 0;
+    aspect-ratio: 1;
+    padding: 6px;
+    overflow: hidden;
+    border: 1px solid var(--qlsm-border);
+    border-radius: 6px;
+    background: var(--qlsm-fill);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-item:hover,
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-item:focus-within {
+    border-color: color-mix(in srgb, var(--qlsm-accent) 52%, var(--qlsm-border));
+    background: var(--qlsm-hover);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-media {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-item[data-error="true"]::before {
+    content: "?";
+    color: var(--qlsm-muted);
+    font-size: 18px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-item[data-error="true"] .qlsm-sticker-media {
+    display: none;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-delete {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid color-mix(in srgb, var(--text_error, #e5484d) 35%, var(--qlsm-border));
+    border-radius: 5px;
+    color: var(--text_error, #d43c43);
+    background: color-mix(in srgb, var(--qlsm-surface) 90%, transparent);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .14);
+    cursor: pointer;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-delete:hover:not(:disabled) {
+    color: #fff;
+    background: var(--text_error, #d43c43);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-sticker-delete svg {
+    width: 15px;
+    height: 15px;
+    pointer-events: none;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-group[data-busy="true"] {
+    pointer-events: none;
+    opacity: .68;
 }
 
 #qqnt-toolbox-local-sticker-manager .qlsm-directory-row {
@@ -171,7 +252,6 @@
     gap: 6px;
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-pane-intro,
 #qqnt-toolbox-local-sticker-manager .qlsm-form-section {
     padding: 16px 18px 12px;
 }
@@ -182,7 +262,6 @@
     font-weight: 600;
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-pane-meta,
 #qqnt-toolbox-local-sticker-manager .qlsm-form-meta,
 #qqnt-toolbox-local-sticker-manager .qlsm-config-meta,
 #qqnt-toolbox-local-sticker-manager .qlsm-pack-meta,
@@ -199,17 +278,25 @@
     overscroll-behavior: contain;
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-pack-row {
-    display: grid;
-    grid-template-columns: 30px 42px minmax(0, 1fr);
-    align-items: center;
-    min-height: 62px;
-    gap: 10px;
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-group {
+    min-width: 0;
     border-bottom: 1px solid var(--qlsm-border);
     background: var(--qlsm-surface);
 }
 
-#qqnt-toolbox-local-sticker-manager .qlsm-pack-row[data-dragging="true"] {
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-row {
+    display: grid;
+    grid-template-columns: 30px 42px minmax(0, 1fr) 64px;
+    align-items: center;
+    min-height: 62px;
+    gap: 10px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-group[data-expanded="true"] {
+    background: color-mix(in srgb, var(--qlsm-fill) 24%, var(--qlsm-surface));
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-group[data-dragging="true"] {
     opacity: .22;
 }
 
@@ -238,9 +325,11 @@
 }
 
 #qqnt-toolbox-local-sticker-manager .qlsm-pack-image {
+    display: block;
     width: 40px;
     height: 40px;
     object-fit: contain;
+    pointer-events: none;
 }
 
 #qqnt-toolbox-local-sticker-manager .qlsm-pack-image[data-error="true"] {
@@ -258,6 +347,66 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-expand,
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-delete {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 5px;
+    color: var(--qlsm-muted);
+    background: transparent;
+    cursor: pointer;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-expand:hover {
+    color: var(--qlsm-text);
+    background: var(--qlsm-hover);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-delete {
+    color: var(--text_error, #d43c43);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-delete:hover:not(:disabled) {
+    color: #fff;
+    background: var(--text_error, #d43c43);
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-delete svg {
+    width: 15px;
+    height: 15px;
+    pointer-events: none;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-expand-icon {
+    width: 8px;
+    height: 8px;
+    border-right: 1.6px solid currentColor;
+    border-bottom: 1.6px solid currentColor;
+    transform: rotate(45deg) translate(-1px, -1px);
+    transition: transform 120ms ease;
+}
+
+#qqnt-toolbox-local-sticker-manager .qlsm-pack-group[data-expanded="true"] .qlsm-pack-expand-icon {
+    transform: rotate(225deg) translate(-1px, -1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #qqnt-toolbox-local-sticker-manager .qlsm-pack-expand-icon {
+        transition: none;
+    }
 }
 
 #qqnt-toolbox-local-sticker-manager .qlsm-pane-footer {

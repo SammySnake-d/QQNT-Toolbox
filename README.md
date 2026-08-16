@@ -188,10 +188,10 @@ NoSeq 通常表示消息在弱网环境下可能没有成功发送，或者被�
 
 “直接发送方式”可在 `Alt + 单击`（默认）与“单击”之间选择，本地贴纸以及 QQ 原生面板中除“默认表情”外的收藏表情、贴纸包和图片表情共用这一设置；未匹配直发手势时仍会插入当前 QQ 输入框。按住 `Ctrl` 操作本地贴纸后会保持面板打开。“发送形式”选择“贴纸”时使用 QQ 贴纸子类型，选择“图片”时按普通图片发送。最近使用记录保存在所选目录的 `recentStickers.json` 中；插件只在面板打开或手动刷新时扫描目录，不会常驻监听整个文件树。
 
-“贴纸集排序”会打开独立管理页，可拖动贴纸集调整顺序；保存后只更新各目录的 `sticker.json.index`，不会移动或重命名图片。“Telegram 贴纸”页支持填写 `t.me/addstickers/...` 链接下载普通贴纸包，并提供以下配置：
+“贴纸集排序”会打开独立管理页，可拖动贴纸集调整顺序，也可直接展开任一贴纸集并删除单张贴纸，或从标题行删除整个贴纸集；删除后会同步清理最近使用记录。“Telegram 贴纸”页支持填写 `t.me/addstickers/...` 链接下载普通贴纸包，并提供以下配置：
 
 - `Telegram Bot Token`：在 Telegram 中通过 `@BotFather` 获取，只保存在 Toolbox 本地配置中。
-- `FFmpeg`：用于把 Telegram 视频贴纸转换为 GIF；路径留空时自动从 `PATH` 查找，普通静态 WebP 贴纸不依赖 FFmpeg。
+- `FFmpeg`：用于将带 Alpha 的 Telegram WebM 视频贴纸转换为透明 GIF，并为保留为 WebM 的贴纸生成发送预览图；路径留空时自动从 `PATH` 查找。不带 Alpha 的视频贴纸仍原样保存为 WebM。
 - `tgsToGif`：用于把 TGS 动画贴纸转换为 GIF；路径留空时自动从 `PATH` 查找，可从 [tgs_to_gif Releases](https://github.com/jiongjiongJOJO/tgs_to_gif/releases/latest) 下载，未找到时会跳过 TGS。
 
 Telegram 贴纸下载与插件更新共用“其他 > 网络”中的代理地址，支持 HTTP、HTTPS 和 SOCKS。地址留空时会优先读取可用的代理环境变量，再使用 Chromium 的系统代理/PAC。这些设置只作用于 Toolbox 发起的网络请求，不会修改 QQ 的全局网络设置。

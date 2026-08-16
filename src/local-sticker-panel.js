@@ -85,6 +85,30 @@ export function localStickerFileUrl(filePath) {
     return 'local:///' + encoded;
 }
 
+function isVideoStickerPath(filePath) {
+    return /\.webm$/i.test(String(filePath || ''));
+}
+
+function createStickerPreview(filePath) {
+    const media = document.createElement(isVideoStickerPath(filePath) ? 'video' : 'img');
+    media.dataset.stickerPath = filePath;
+    media.draggable = false;
+    media.src = localStickerFileUrl(filePath);
+    if (media instanceof HTMLVideoElement) {
+        media.muted = true;
+        media.defaultMuted = true;
+        media.loop = true;
+        media.autoplay = true;
+        media.playsInline = true;
+        media.preload = 'auto';
+    } else {
+        media.alt = '';
+        media.decoding = 'async';
+        media.loading = 'lazy';
+    }
+    return media;
+}
+
 function getControlLabelValues(element) {
     return [
         element?.getAttribute?.('aria-label'),
@@ -372,6 +396,38 @@ export function insertLocalStickerIntoComposer(filePath, picSubType) {
     }
 }
 
+async function insertLocalVideoIntoComposer(filePath) {
+    const composer = findMessageComposer();
+    if (!composer || typeof DataTransfer !== 'function' || typeof DragEvent !== 'function') {
+        return false;
+    }
+    try {
+        const response = await fetch(localStickerFileUrl(filePath));
+        if (!response.ok) {
+            return false;
+        }
+        const fileName = String(filePath || '').split(/[\\/]/).pop() || 'sticker.webm';
+        const blob = await response.blob();
+        const transfer = new DataTransfer();
+        transfer.items.add(new File([blob], fileName, {
+            type: blob.type || 'video/webm',
+            lastModified: Date.now()
+        }));
+        composer.focus();
+        for (const type of ['dragenter', 'dragover', 'drop']) {
+            composer.dispatchEvent(new DragEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                dataTransfer: transfer
+            }));
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 function packIdentity(pack) {
     return `${pack?.recent === true ? 'recent' : 'pack'}:${pack?.dirPath || ''}:${pack?.label || ''}`;
 }
@@ -483,15 +539,14 @@ export function createLocalStickerController(options = {}) {
             button.type = 'button';
             button.dataset.stickerPath = sticker.path;
             button.setAttribute('aria-label', sticker.label || '\u672c\u5730\u8d34\u7eb8');
-            const image = document.createElement('img');
-            image.alt = '';
-            image.decoding = 'async';
-            image.loading = 'lazy';
-            image.draggable = false;
-            image.src = localStickerFileUrl(sticker.path);
-            image.addEventListener('load', () => button.dataset.loaded = 'true', { once: true });
-            image.addEventListener('error', () => button.dataset.error = 'true', { once: true });
-            button.append(image);
+            const media = createStickerPreview(sticker.path);
+            media.addEventListener(
+                media instanceof HTMLVideoElement ? 'loadeddata' : 'load',
+                () => button.dataset.loaded = 'true',
+                { once: true }
+            );
+            media.addEventListener('error', () => button.dataset.error = 'true', { once: true });
+            button.append(media);
             grid.append(button);
         }
         content.append(grid);
@@ -516,16 +571,12 @@ export function createLocalStickerController(options = {}) {
             button.setAttribute('aria-label', pack.label || '\u8d34\u7eb8\u5305');
             button.title = pack.label || '\u8d34\u7eb8\u5305';
             if (pack.icon) {
-                const image = document.createElement('img');
-                image.alt = '';
-                image.loading = 'lazy';
-                image.draggable = false;
-                image.src = localStickerFileUrl(pack.icon);
-                image.addEventListener('error', () => {
-                    image.remove();
+                const media = createStickerPreview(pack.icon);
+                media.addEventListener('error', () => {
+                    media.remove();
                     button.dataset.fallback = (pack.label || '?').slice(0, 1);
                 }, { once: true });
-                button.append(image);
+                button.append(media);
             } else {
                 button.dataset.fallback = (pack.label || '?').slice(0, 1);
             }
@@ -639,9 +690,14 @@ export function createLocalStickerController(options = {}) {
             } finally {
                 root.removeAttribute('data-busy');
             }
-        } else if (!insertLocalStickerIntoComposer(stickerPath, picSubType)) {
-            setNotice('\u65e0\u6cd5\u63d2\u5165\u5f53\u524d\u8f93\u5165\u6846', true);
-            return;
+        } else {
+            const inserted = isVideoStickerPath(stickerPath)
+                ? await insertLocalVideoIntoComposer(stickerPath)
+                : insertLocalStickerIntoComposer(stickerPath, picSubType);
+            if (!inserted) {
+                setNotice('\u65e0\u6cd5\u63d2\u5165\u5f53\u524d\u8f93\u5165\u6846', true);
+                return;
+            }
         }
         rememberSticker(stickerPath);
         if (!event.ctrlKey) {
@@ -1042,11 +1098,22 @@ export function createLocalStickerController(options = {}) {
         return result;
     }
 
+    function releasePreview(filePath) {
+        for (const video of root?.querySelectorAll?.('video[data-sticker-path]') || []) {
+            if (video.dataset.stickerPath === filePath) {
+                video.pause();
+                video.removeAttribute('src');
+                video.load();
+            }
+        }
+    }
+
     return {
         close,
         install,
         open,
         refresh,
+        releasePreview,
         sync
     };
 }

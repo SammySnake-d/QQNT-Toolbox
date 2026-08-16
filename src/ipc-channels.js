@@ -29,10 +29,14 @@ const CHANNEL_REPEAT_MESSAGE = 'qqnt-toolbox:repeat-message';
 const CHANNEL_STAGE_FAKE_FORWARD_IMAGE = 'qqnt-toolbox:stage-fake-forward-image';
 const CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME = 'qqnt-toolbox:resolve-fake-forward-sender-name';
 const CHANNEL_SEND_FAKE_FORWARD = 'qqnt-toolbox:send-fake-forward';
+const CHANNEL_SEND_MESSAGE_PACKET = 'qqnt-toolbox:send-message-packet';
+const CHANNEL_PULL_MESSAGE_PACKET = 'qqnt-toolbox:pull-message-packet';
 const CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY = 'qqnt-toolbox:choose-local-sticker-directory';
 const CHANNEL_GET_LOCAL_STICKERS = 'qqnt-toolbox:get-local-stickers';
 const CHANNEL_REMEMBER_LOCAL_STICKER = 'qqnt-toolbox:remember-local-sticker';
 const CHANNEL_SEND_LOCAL_STICKER = 'qqnt-toolbox:send-local-sticker';
+const CHANNEL_DELETE_LOCAL_STICKER = 'qqnt-toolbox:delete-local-sticker';
+const CHANNEL_DELETE_LOCAL_STICKER_PACK = 'qqnt-toolbox:delete-local-sticker-pack';
 const CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY = 'qqnt-toolbox:open-local-sticker-directory';
 const CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER = 'qqnt-toolbox:update-local-sticker-pack-order';
 const CHANNEL_CHOOSE_LOCAL_STICKER_TOOL = 'qqnt-toolbox:choose-local-sticker-tool';
@@ -94,10 +98,14 @@ module.exports = Object.freeze({
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
     CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
     CHANNEL_SEND_FAKE_FORWARD,
+    CHANNEL_SEND_MESSAGE_PACKET,
+    CHANNEL_PULL_MESSAGE_PACKET,
     CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY,
     CHANNEL_GET_LOCAL_STICKERS,
     CHANNEL_REMEMBER_LOCAL_STICKER,
     CHANNEL_SEND_LOCAL_STICKER,
+    CHANNEL_DELETE_LOCAL_STICKER,
+    CHANNEL_DELETE_LOCAL_STICKER_PACK,
     CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY,
     CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER,
     CHANNEL_CHOOSE_LOCAL_STICKER_TOOL,

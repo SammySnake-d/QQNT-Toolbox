@@ -44,7 +44,12 @@ function getToolCandidates(toolName) {
 }
 
 async function runTool(toolName, args, options = {}) {
-    for (const command of getToolCandidates(toolName)) {
+    const { command: configuredCommand, ...execOptions } = options;
+    const commands = Array.from(new Set([
+        configuredCommand,
+        ...getToolCandidates(toolName)
+    ].filter(Boolean)));
+    for (const command of commands) {
         if (path.isAbsolute(command) && !fsSync.existsSync(command)) {
             continue;
         }
@@ -52,7 +57,7 @@ async function runTool(toolName, args, options = {}) {
             return await execFile(command, args, {
                 windowsHide: true,
                 maxBuffer: 512 * 1024 * 1024,
-                ...options
+                ...execOptions
             });
         } catch (error) {
             if (error.code === 'ENOENT') {

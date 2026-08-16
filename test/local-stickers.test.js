@@ -8,6 +8,8 @@ const test = require('node:test');
 
 const {
     buildLocalStickerStore,
+    deleteLocalSticker,
+    deleteLocalStickerPack,
     isPathInside,
     normalizeLocalStickerConfig,
     readRecentStickerPaths,
@@ -78,6 +80,7 @@ test('scans image packs and applies bounded sticker.json metadata', async t => {
     await Promise.all([
         fs.writeFile(path.join(first, 'a.png'), 'a'),
         fs.writeFile(path.join(first, 'b.webp'), 'b'),
+        fs.writeFile(path.join(first, 'transparent.webm'), 'video'),
         fs.writeFile(path.join(first, 'ignored.txt'), 'ignored'),
         fs.writeFile(path.join(second, 'c.gif'), 'c'),
         fs.writeFile(path.join(first, 'sticker.json'), JSON.stringify({
@@ -95,7 +98,7 @@ test('scans image packs and applies bounded sticker.json metadata', async t => {
     const result = await scanLocalStickerPacks(root);
     assert.equal(result.status, 'success');
     assert.deepEqual(result.stickerPacks.map(pack => pack.label), ['第一包', '第二包']);
-    assert.deepEqual(result.stickerPacks.map(pack => pack.stickers.length), [1, 2]);
+    assert.deepEqual(result.stickerPacks.map(pack => pack.stickers.length), [1, 3]);
     assert.equal(result.stickerPacks[0].icon, result.stickerPacks[0].stickers[0].path);
     assert.equal(path.basename(result.stickerPacks[1].icon), 'b.webp');
 });
@@ -141,20 +144,91 @@ test('recent stickers are deduplicated, bounded and limited to the selected root
 test('resolves only supported files physically contained by the sticker root', async t => {
     const root = await createTempDirectory(t);
     const inside = path.join(root, 'inside.png');
+    const video = path.join(root, 'inside.webm');
     const unsupported = path.join(root, 'inside.txt');
     const outsideDirectory = await createTempDirectory(t);
     const outside = path.join(outsideDirectory, 'outside.png');
     await Promise.all([
         fs.writeFile(inside, 'inside'),
+        fs.writeFile(video, 'video'),
         fs.writeFile(unsupported, 'unsupported'),
         fs.writeFile(outside, 'outside')
     ]);
 
     assert.equal(await resolveLocalStickerPath(root, inside), await fs.realpath(inside));
+    assert.equal(await resolveLocalStickerPath(root, video), await fs.realpath(video));
     assert.equal(await resolveLocalStickerPath(root, unsupported), '');
     assert.equal(await resolveLocalStickerPath(root, outside), '');
     assert.equal(isPathInside(root, inside), true);
     assert.equal(isPathInside(root, path.join(root, '..', 'outside.png')), false);
+});
+
+test('deletes only contained sticker files and removes them from recent history', async t => {
+    const root = await createTempDirectory(t);
+    const packDirectory = path.join(root, 'pack');
+    const outsideDirectory = await createTempDirectory(t);
+    const sticker = path.join(packDirectory, 'delete-me.webp');
+    const keep = path.join(packDirectory, 'keep.png');
+    const unsupported = path.join(packDirectory, 'notes.txt');
+    const outside = path.join(outsideDirectory, 'outside.png');
+    await fs.mkdir(packDirectory);
+    await Promise.all([
+        fs.writeFile(sticker, 'sticker'),
+        fs.writeFile(keep, 'keep'),
+        fs.writeFile(unsupported, 'notes'),
+        fs.writeFile(outside, 'outside')
+    ]);
+    await rememberRecentSticker(root, keep, 4);
+    await rememberRecentSticker(root, sticker, 4);
+
+    assert.deepEqual(await deleteLocalSticker(root, sticker), { ok: true });
+    await assert.rejects(fs.stat(sticker), error => error?.code === 'ENOENT');
+    assert.deepEqual(
+        (await readRecentStickerPaths(root)).map(value => path.basename(value)),
+        ['keep.png']
+    );
+    assert.equal((await deleteLocalSticker(root, unsupported)).reason, 'invalid-sticker-path');
+    assert.equal((await deleteLocalSticker(root, outside)).reason, 'invalid-sticker-path');
+    assert.equal((await deleteLocalSticker(root, sticker)).reason, 'delete-failed');
+    assert.equal((await fs.readFile(unsupported, 'utf8')), 'notes');
+    assert.equal((await fs.readFile(outside, 'utf8')), 'outside');
+});
+
+test('deletes one sticker pack without removing unrelated directory contents', async t => {
+    const root = await createTempDirectory(t);
+    const removable = path.join(root, 'removable');
+    const clean = path.join(root, 'clean');
+    const keepPack = path.join(root, 'keep-pack');
+    await Promise.all([fs.mkdir(removable), fs.mkdir(clean), fs.mkdir(keepPack)]);
+    const first = path.join(removable, 'first.png');
+    const second = path.join(removable, 'second.webm');
+    const note = path.join(removable, 'note.txt');
+    const cleanSticker = path.join(clean, 'only.webp');
+    const keptSticker = path.join(keepPack, 'keep.gif');
+    await Promise.all([
+        fs.writeFile(first, 'first'),
+        fs.writeFile(second, 'second'),
+        fs.writeFile(note, 'preserve'),
+        fs.writeFile(path.join(removable, 'sticker.json'), JSON.stringify({ label: '删除包' })),
+        fs.writeFile(cleanSticker, 'clean'),
+        fs.writeFile(keptSticker, 'keep')
+    ]);
+    await rememberRecentSticker(root, keptSticker, 8);
+    await rememberRecentSticker(root, second, 8);
+
+    assert.deepEqual(await deleteLocalStickerPack(root, removable), { ok: true, deleted: 2 });
+    assert.equal(await fs.readFile(note, 'utf8'), 'preserve');
+    await assert.rejects(fs.stat(first), error => error?.code === 'ENOENT');
+    await assert.rejects(fs.stat(second), error => error?.code === 'ENOENT');
+    await assert.rejects(fs.stat(path.join(removable, 'sticker.json')), error => error?.code === 'ENOENT');
+    assert.deepEqual(
+        (await readRecentStickerPaths(root)).map(value => path.basename(value)),
+        ['keep.gif']
+    );
+    assert.deepEqual(await deleteLocalStickerPack(root, clean), { ok: true, deleted: 1 });
+    await assert.rejects(fs.stat(clean), error => error?.code === 'ENOENT');
+    assert.equal((await deleteLocalStickerPack(root, path.join(root, 'missing'))).reason, 'invalid-sticker-pack');
+    assert.equal(await fs.readFile(keptSticker, 'utf8'), 'keep');
 });
 
 test('persists sticker pack order without discarding existing metadata', async t => {

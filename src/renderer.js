@@ -9,6 +9,7 @@ import {
 } from './control-label-match.js';
 import { createReactionLimitController } from './reaction-limit.js';
 import { createFakeForwardEditor } from './fake-forward-editor.js';
+import { createMessagePacketEditor } from './message-packet-editor.js';
 import {
     bindNativeChatToolbarAction,
     createNativeChatToolbarEntry,
@@ -90,6 +91,7 @@ let handleToolboxVueComponentMount = () => {};
     const TOOLBOX_MENU_TYPE_REPEAT = 990101;
     const TOOLBOX_MENU_TYPE_QR_SCAN = 990102;
     const TOOLBOX_MENU_TYPE_MESSAGE_TO_IMAGE = 990103;
+    const TOOLBOX_MENU_TYPE_MESSAGE_PULL = 990104;
     const DEFAULT_MESSAGE_IMAGE_FILE_NAME_PATTERN =
         '{source}-{yyyy}{MM}{dd}-{HH}{mm}{ss}';
     const RECALL_MARKER_STYLE_VALUES = new Set(['badge', 'outline']);
@@ -178,6 +180,7 @@ let handleToolboxVueComponentMount = () => {};
             fakeDurationSeconds: 1
         },
         messageTweaks: {
+            sendArkMessage: false,
             promptNoSeq: false,
             messageToImage: false,
             messageToImageIncludeBackground: false,
@@ -308,6 +311,7 @@ let handleToolboxVueComponentMount = () => {};
     let messageImageController = null;
     let reactionLimitController = null;
     let fakeForwardEditor = null;
+    let messagePacketEditor = null;
     let windowShakeSending = false;
     let recallFilterEditor = null;
     let autoDownloadPeerEditor = null;
@@ -853,6 +857,20 @@ let handleToolboxVueComponentMount = () => {};
                     if (result?.ok) {
                         localStickerController?.refresh(false).catch(() => {});
                     }
+                    return result;
+                },
+                deleteSticker: async filePath => {
+                    localStickerController?.releasePreview(filePath);
+                    const result = await getBridge()?.deleteLocalSticker?.(filePath);
+                    localStickerController?.refresh(false).catch(() => {});
+                    return result;
+                },
+                deletePack: async (packPath, stickerPaths) => {
+                    for (const filePath of Array.isArray(stickerPaths) ? stickerPaths : []) {
+                        localStickerController?.releasePreview(filePath);
+                    }
+                    const result = await getBridge()?.deleteLocalStickerPack?.(packPath);
+                    localStickerController?.refresh(false).catch(() => {});
                     return result;
                 },
                 chooseTool: tool => getBridge()?.chooseLocalStickerTool?.(tool),
@@ -2354,6 +2372,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             updateConfigUi(root);
         }
         fakeForwardEditor?.sync();
+        messagePacketEditor?.sync();
         localStickerController?.sync();
         syncWindowShakeToolbarEntry();
         const panel = document.getElementById(PANEL_ID);
@@ -2576,7 +2595,8 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
                     child: true
                 }),
                 createSwitchItem(text('移除回复 @'), text('移除回复消息时的 @ 标记'), 'messageTweaks.removeReplyAt'),
-                createSwitchItem(text('伪造合并转发'), text('在当前会话创建自定义聊天记录'), 'fakeForward.enabled')
+                createSwitchItem(text('伪造合并转发'), text('在当前会话创建自定义聊天记录'), 'fakeForward.enabled'),
+                createSwitchItem(text('消息工具'), text('发送元素、Ark、XML、文本并拉取原始消息'), 'messageTweaks.sendArkMessage')
             ]),
             createSection('preventRecall', text('阻止撤回'), [
                 createSwitchItem(text('启用消息防撤回'), text('将撤回灰条替换回原消息'), 'preventRecall.enabled'),
@@ -7437,6 +7457,36 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         icon.style.webkitMaskImage = 'none';
     }
 
+    function setNativeMenuItemPullIcon(item) {
+        const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
+        if (!icon) {
+            return;
+        }
+        const namespace = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(namespace, 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('fill', 'none');
+        svg.style.width = '16px';
+        svg.style.height = '16px';
+        for (const data of ['M12 3v12', 'm7 10 5 5 5-5', 'M5 21h14']) {
+            const path = document.createElementNS(namespace, 'path');
+            path.setAttribute('d', data);
+            path.setAttribute('stroke', 'currentColor');
+            path.setAttribute('stroke-width', '1.8');
+            path.setAttribute('stroke-linecap', 'round');
+            path.setAttribute('stroke-linejoin', 'round');
+            svg.append(path);
+        }
+        icon.replaceChildren(svg);
+        icon.style.display = icon.style.display || 'flex';
+        icon.style.alignItems = 'center';
+        icon.style.justifyContent = 'center';
+        icon.style.background = 'transparent';
+        icon.style.backgroundImage = 'none';
+        icon.style.maskImage = 'none';
+        icon.style.webkitMaskImage = 'none';
+    }
+
     function setNativeMenuItemPokeIcon(item) {
         const icon = item.querySelector?.('.q-context-menu-item__icon,[class*="context-menu-item__icon"]');
         if (!icon) {
@@ -7729,6 +7779,22 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         };
     }
 
+    function createMessagePullContextMenuConfig(record) {
+        return {
+            type: TOOLBOX_MENU_TYPE_MESSAGE_PULL,
+            text: text('拉取'),
+            icon: 'download',
+            when: () => true,
+            handler: () => window.setTimeout(() => messagePacketEditor?.pull(record), 0),
+            __qqntToolboxDescriptor: {
+                id: 'toolbox:message-pull',
+                label: text('拉取'),
+                toolbox: true
+            },
+            __qqntToolboxInsertAfter: ['qq:复制']
+        };
+    }
+
     function createPokeRecallMenuItem(menu, record, messageElement) {
         const template = getNativeMenuItemElements(menu)[0];
         const item = template?.cloneNode(true) || document.createElement('div');
@@ -7834,6 +7900,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         if (isConfigEnabled('messageTweaks.messageToImage') && messageElement) {
             items.push(createMessageImageContextMenuConfig(messageElement));
         }
+        if (isConfigEnabled('messageTweaks.sendArkMessage') && [1, 2].includes(Number(record.chatType))) {
+            items.push(createMessagePullContextMenuConfig(record));
+        }
         return items;
     }
 
@@ -7848,6 +7917,9 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         } else if (isConfigEnabled('messageTweaks.messageToImage') && label === text('转图')) {
             item.classList.add('qqnt-toolbox-message-to-image-menu-item');
             setNativeMenuItemMessageImageIcon(item);
+        } else if (isConfigEnabled('messageTweaks.sendArkMessage') && label === text('拉取')) {
+            item.classList.add('qqnt-toolbox-message-pull-menu-item');
+            setNativeMenuItemPullIcon(item);
         }
     }
 
@@ -8178,6 +8250,30 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
         }, 'error')
     });
     fakeForwardEditor.install();
+
+    messagePacketEditor = createMessagePacketEditor({
+        getEnabled: () => isConfigEnabled('messageTweaks.sendArkMessage'),
+        getPeer: () => getPeerFromRecord({}),
+        getSelfUin: () => registeredPokeAccountUin || registerPokeAccountFromPage(true),
+        send: payload => {
+            const sendMessagePacket = getBridge()?.sendMessagePacket;
+            if (typeof sendMessagePacket !== 'function') {
+                throw new Error('消息发送接口不可用');
+            }
+            return sendMessagePacket(payload);
+        },
+        pull: payload => {
+            const pullMessagePacket = getBridge()?.pullMessagePacket;
+            if (typeof pullMessagePacket !== 'function') {
+                throw new Error('消息拉取接口不可用');
+            }
+            return pullMessagePacket(payload);
+        },
+        onError: error => recordRendererDiagnostic('message-packet.failed', {
+            reason: error?.message || String(error)
+        }, 'error')
+    });
+    messagePacketEditor.install();
 
     localStickerController = createLocalStickerController({
         getConfig: () => currentConfig,

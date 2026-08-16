@@ -11,6 +11,7 @@ const {
     downloadTelegramStickerPack,
     findExecutableOnPath,
     getEnvironmentHttpProxy,
+    hasWebmAlphaMode,
     inspectLocalStickerTools,
     normalizeHttpProxyUrl,
     normalizeTelegramBotToken,
@@ -57,6 +58,14 @@ test('parses only Telegram sticker-set links and validates download credentials'
     assert.deepEqual(getEnvironmentHttpProxy({
         HTTPS_PROXY: 'socks5://127.0.0.1:1080'
     }), { url: '', source: '' });
+});
+
+test('detects the WebM AlphaMode element only before media clusters', () => {
+    const alphaMode = Buffer.from([0x53, 0xc0, 0x81, 0x01]);
+    const cluster = Buffer.from([0x1f, 0x43, 0xb6, 0x75]);
+    assert.equal(hasWebmAlphaMode(Buffer.concat([Buffer.from('webm'), alphaMode, cluster])), true);
+    assert.equal(hasWebmAlphaMode(Buffer.concat([Buffer.from('webm'), cluster, alphaMode])), false);
+    assert.equal(hasWebmAlphaMode(Buffer.from('opaque-webm')), false);
 });
 
 test('finds optional sticker converters from PATH without requiring saved paths', async t => {
@@ -149,4 +158,120 @@ test('downloads a bounded static Telegram sticker pack into its configured root'
     assert.equal(metadata.label, '测试贴纸');
     assert.equal(metadata.icon, 'unique-one.webp');
     assert.equal(metadata.url, 'https://t.me/addstickers/Test_pack');
+});
+
+test('keeps Telegram video stickers as WebM without requiring FFmpeg', async t => {
+    const root = await createTempDirectory(t);
+    const token = '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
+    const videoData = Buffer.from('transparent-webm');
+    const packDirectory = path.join(root, 'Video_pack');
+    await fs.mkdir(packDirectory);
+    await fs.writeFile(path.join(packDirectory, 'video-one.gif'), 'legacy');
+    const fakeFetch = async value => {
+        const url = new URL(String(value));
+        if (url.pathname.endsWith('/getStickerSet')) {
+            return jsonResponse({
+                ok: true,
+                result: {
+                    name: 'Video_pack',
+                    title: '视频贴纸',
+                    sticker_type: 'regular',
+                    stickers: [{
+                        file_id: 'video-one',
+                        file_unique_id: 'video-one',
+                        is_video: true
+                    }]
+                }
+            });
+        }
+        if (url.pathname.endsWith('/getFile')) {
+            return jsonResponse({
+                ok: true,
+                result: { file_path: 'stickers/video-one.webm' }
+            });
+        }
+        if (url.pathname.includes('/file/bot')) {
+            return new Response(videoData, {
+                status: 200,
+                headers: { 'content-type': 'video/webm' }
+            });
+        }
+        throw new Error('unexpected request');
+    };
+
+    const result = await downloadTelegramStickerPack({
+        url: 'https://t.me/addstickers/Video_pack',
+        rootPath: root,
+        botToken: token,
+        environment: { PATH: '', PATHEXT: '.EXE' },
+        fetch: fakeFetch
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.downloaded, 1);
+    assert.deepEqual((await fs.readdir(packDirectory)).sort(), ['sticker.json', 'video-one.webm']);
+    assert.deepEqual(await fs.readFile(path.join(packDirectory, 'video-one.webm')), videoData);
+    const metadata = JSON.parse(await fs.readFile(path.join(packDirectory, 'sticker.json'), 'utf8'));
+    assert.equal(metadata.icon, 'video-one.webm');
+});
+
+test('converts alpha WebM stickers to transparent GIF with libvpx decoding', async t => {
+    const root = await createTempDirectory(t);
+    const token = '123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef';
+    const toolPath = path.join(root, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    await fs.writeFile(toolPath, 'tool');
+    const alphaWebm = Buffer.concat([
+        Buffer.from('webm-header'),
+        Buffer.from([0x53, 0xc0, 0x81, 0x01]),
+        Buffer.from([0x1f, 0x43, 0xb6, 0x75]),
+        Buffer.from('media')
+    ]);
+    let conversion = null;
+    const fakeFetch = async value => {
+        const url = new URL(String(value));
+        if (url.pathname.endsWith('/getStickerSet')) {
+            return jsonResponse({
+                ok: true,
+                result: {
+                    name: 'Alpha_pack',
+                    title: '透明视频贴纸',
+                    sticker_type: 'regular',
+                    stickers: [{
+                        file_id: 'alpha-one',
+                        file_unique_id: 'alpha-one',
+                        is_video: true
+                    }]
+                }
+            });
+        }
+        if (url.pathname.endsWith('/getFile')) {
+            return jsonResponse({ ok: true, result: { file_path: 'stickers/alpha-one.webm' } });
+        }
+        return new Response(alphaWebm, {
+            status: 200,
+            headers: { 'content-type': 'video/webm' }
+        });
+    };
+    const packDirectory = path.join(root, 'Alpha_pack');
+    await fs.mkdir(packDirectory);
+    await fs.writeFile(path.join(packDirectory, 'alpha-one.webm'), 'legacy');
+
+    const result = await downloadTelegramStickerPack({
+        url: 'https://t.me/addstickers/Alpha_pack',
+        rootPath: root,
+        botToken: token,
+        ffmpegPath: toolPath,
+        fetch: fakeFetch,
+        convertSticker: async (command, args, input, targetPath) => {
+            conversion = { command, args, input, targetPath };
+            await fs.writeFile(targetPath, 'transparent-gif');
+        }
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(conversion.command, await fs.realpath(toolPath));
+    assert.deepEqual(conversion.input, alphaWebm);
+    assert.equal(path.basename(conversion.targetPath), 'alpha-one.gif');
+    assert.ok(conversion.args.includes('libvpx-vp9'));
+    assert.ok(conversion.args.some(value => String(value).includes('reserve_transparent=1')));
+    assert.deepEqual((await fs.readdir(packDirectory)).sort(), ['alpha-one.gif', 'sticker.json']);
 });

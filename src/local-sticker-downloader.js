@@ -150,6 +150,17 @@ function sanitizeFilePart(value, fallback = 'sticker') {
     return result && !['.', '..'].includes(result) ? result : fallback;
 }
 
+function hasWebmAlphaMode(buffer) {
+    if (!Buffer.isBuffer(buffer) || buffer.length < 4) {
+        return false;
+    }
+    const headerEnd = buffer.indexOf(Buffer.from([0x1f, 0x43, 0xb6, 0x75]));
+    const limit = headerEnd >= 0 ? headerEnd : Math.min(buffer.length, 64 * 1024);
+    const alphaMode = Buffer.from([0x53, 0xc0, 0x81, 0x01]);
+    const index = buffer.indexOf(alphaMode);
+    return index >= 0 && index < limit;
+}
+
 async function readLimitedResponseBuffer(response, maximumBytes) {
     const contentLength = Number(response?.headers?.get?.('content-length'));
     if (Number.isFinite(contentLength) && contentLength > maximumBytes) {
@@ -421,14 +432,14 @@ async function downloadTelegramStickerPack(options = {}) {
     });
     const ffmpeg = tools.ffmpeg.available ? tools.ffmpeg.path : '';
     const tgsToGif = tools.tgsToGif.available ? tools.tgsToGif.path : '';
+    const runConversion = typeof options.convertSticker === 'function'
+        ? options.convertSticker
+        : convertSticker;
     const results = new Array(stickers.length);
     let cursor = 0;
     let totalBytes = 0;
 
     const downloadOne = async (sticker, index) => {
-        if (sticker?.is_video && !ffmpeg) {
-            return { status: 'skipped', reason: 'ffmpeg-not-configured' };
-        }
         if (sticker?.is_animated && !tgsToGif) {
             return { status: 'skipped', reason: 'tgs-tool-not-configured' };
         }
@@ -442,17 +453,28 @@ async function downloadTelegramStickerPack(options = {}) {
         }
         const baseName = sanitizeFilePart(sticker?.file_unique_id, `sticker-${index + 1}`);
         if (sticker?.is_video) {
-            const fileName = `${baseName}.gif`;
-            await convertSticker(ffmpeg, [
-                '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
-                '-vf', 'fps=20,scale=min(512\\,iw):-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse',
-                '-loop', '0', '-y'
-            ], buffer, path.join(directory, fileName));
+            const transparent = hasWebmAlphaMode(buffer);
+            const fileName = `${baseName}.${transparent && ffmpeg ? 'gif' : 'webm'}`;
+            if (transparent && ffmpeg) {
+                await runConversion(ffmpeg, [
+                    '-hide_banner', '-loglevel', 'error',
+                    '-c:v', 'libvpx-vp9', '-i', 'pipe:0',
+                    '-filter_complex',
+                    '[0:v]fps=20,scale=min(512\\,iw):-1:flags=lanczos,format=rgba,split[s0][s1];' +
+                    '[s0]palettegen=reserve_transparent=1:transparency_color=ffffff[p];' +
+                    '[s1][p]paletteuse=alpha_threshold=128:dither=sierra2_4a',
+                    '-loop', '0', '-y'
+                ], buffer, path.join(directory, fileName));
+            } else {
+                await writeFileAtomic(path.join(directory, fileName), buffer);
+            }
+            const staleExtension = path.extname(fileName).toLowerCase() === '.gif' ? '.webm' : '.gif';
+            await fs.unlink(path.join(directory, `${baseName}${staleExtension}`)).catch(() => {});
             return { status: 'downloaded', fileName };
         }
         if (sticker?.is_animated) {
             const fileName = `${baseName}.gif`;
-            await convertSticker(tgsToGif, [], buffer, path.join(directory, fileName));
+            await runConversion(tgsToGif, [], buffer, path.join(directory, fileName));
             return { status: 'downloaded', fileName };
         }
         const fileName = `${baseName}.webp`;
@@ -490,9 +512,7 @@ async function downloadTelegramStickerPack(options = {}) {
             .filter(result => result?.status === 'skipped')
             .map(result => result.reason));
         const message = skipped === stickers.length && skippedReasons.size === 1
-            ? skippedReasons.has('ffmpeg-not-configured')
-                ? '这个贴纸包只有视频贴纸，请安装 FFmpeg 或选择其路径'
-                : '这个贴纸包只有 TGS 动画，请安装 tgsToGif 或选择其路径'
+            ? '这个贴纸包只有 TGS 动画，请安装 tgsToGif 或选择其路径'
             : 'Telegram 贴纸下载失败，请检查网络与转换工具';
         throw new LocalStickerDownloadError('sticker-download-failed', message);
     }
@@ -532,6 +552,7 @@ module.exports = {
     downloadTelegramStickerPack,
     findExecutableOnPath,
     getEnvironmentHttpProxy,
+    hasWebmAlphaMode,
     inspectLocalStickerTools,
     normalizeHttpProxyUrl,
     normalizeTelegramBotToken,

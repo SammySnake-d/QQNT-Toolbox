@@ -96,10 +96,14 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
     await api.stageFakeForwardImage({ name: 'image.png', data: new ArrayBuffer(1) });
     await api.resolveFakeForwardSenderName('12345678');
     await api.sendFakeForward({ messages: [] });
+    await api.sendMessagePacket({ peer: { chatType: 2 }, type: 'element', content: '{}' });
+    await api.pullMessagePacket({ record: { chatType: 2, msgSeq: 1 } });
     await api.chooseLocalStickerDirectory();
     await api.getLocalStickers({ force: true });
     await api.rememberLocalSticker('D:\\stickers\\one.png');
     await api.sendLocalSticker({ path: 'D:\\stickers\\one.png' });
+    await api.deleteLocalSticker('D:\\stickers\\one.png');
+    await api.deleteLocalStickerPack('D:\\stickers\\pack');
     await api.openLocalStickerDirectory();
     await api.updateLocalStickerPackOrder(['D:\\stickers\\pack']);
     await api.chooseLocalStickerTool('ffmpeg');
@@ -147,10 +151,14 @@ test('exposes the main Toolbox preload API and stable IPC channels', async () =>
         'qqnt-toolbox:stage-fake-forward-image',
         'qqnt-toolbox:resolve-fake-forward-sender-name',
         'qqnt-toolbox:send-fake-forward',
+        'qqnt-toolbox:send-message-packet',
+        'qqnt-toolbox:pull-message-packet',
         'qqnt-toolbox:choose-local-sticker-directory',
         'qqnt-toolbox:get-local-stickers',
         'qqnt-toolbox:remember-local-sticker',
         'qqnt-toolbox:send-local-sticker',
+        'qqnt-toolbox:delete-local-sticker',
+        'qqnt-toolbox:delete-local-sticker-pack',
         'qqnt-toolbox:open-local-sticker-directory',
         'qqnt-toolbox:update-local-sticker-pack-order',
         'qqnt-toolbox:choose-local-sticker-tool',

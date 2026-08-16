@@ -84,6 +84,8 @@ const {
 } = require('./fake-forward-upload');
 const {
     buildLocalStickerStore,
+    deleteLocalSticker,
+    deleteLocalStickerPack,
     normalizeLocalStickerConfig,
     readRecentStickerPaths,
     rememberRecentSticker,
@@ -146,6 +148,21 @@ const {
 } = require('./single-forward-window');
 const { createWindowShakeController, createWindowShakeElement } = require('./window-shake');
 const {
+    NATIVE_SEND_COMMAND,
+    buildDirectElementRequest,
+    buildLongMessageUploadRequest,
+    buildNativeSendRequest,
+    buildPullMessageRequest,
+    createForwardCard,
+    createLongMessageReferenceElements,
+    createPullMessageViews,
+    createXmlElements,
+    extractLongMessageResid,
+    getDirectSendResult,
+    parseElementJson,
+    summarizeResponseShape
+} = require('./message-packet');
+const {
     constrainPipResize,
     fitPipBounds,
     getPipOuterSize,
@@ -203,10 +220,14 @@ const {
     CHANNEL_STAGE_FAKE_FORWARD_IMAGE,
     CHANNEL_RESOLVE_FAKE_FORWARD_SENDER_NAME,
     CHANNEL_SEND_FAKE_FORWARD,
+    CHANNEL_SEND_MESSAGE_PACKET,
+    CHANNEL_PULL_MESSAGE_PACKET,
     CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY,
     CHANNEL_GET_LOCAL_STICKERS,
     CHANNEL_REMEMBER_LOCAL_STICKER,
     CHANNEL_SEND_LOCAL_STICKER,
+    CHANNEL_DELETE_LOCAL_STICKER,
+    CHANNEL_DELETE_LOCAL_STICKER_PACK,
     CHANNEL_OPEN_LOCAL_STICKER_DIRECTORY,
     CHANNEL_UPDATE_LOCAL_STICKER_PACK_ORDER,
     CHANNEL_CHOOSE_LOCAL_STICKER_TOOL,
@@ -361,6 +382,7 @@ const DEFAULT_CONFIG = {
         fakeDurationSeconds: 1
     },
     messageTweaks: {
+        sendArkMessage: false,
         promptNoSeq: false,
         messageToImage: false,
         messageToImageIncludeBackground: false,
@@ -821,6 +843,7 @@ function getDiagnosticFeatureSummary(config = getConfig()) {
             fakeDuration: config.voiceMessage?.fakeDurationEnabled === true
         },
         message: {
+            sendArkMessage: config.messageTweaks?.sendArkMessage === true,
             promptNoSeq: config.messageTweaks?.promptNoSeq === true,
             customImageSummary: config.messageTweaks?.customImageSummaryEnabled === true,
             removeReplyAt: config.messageTweaks?.removeReplyAt === true
@@ -1813,7 +1836,7 @@ async function resolveFakeForwardPeerUin(browserWindow, peer) {
     return '';
 }
 
-async function invokeFakeForwardSso(browserWindow, request) {
+async function invokeMessageSso(browserWindow, request) {
     installPokeBridge();
     const directResult = await sendSsoThroughWrapperSession(request.command, request.packet);
     return directResult
@@ -2302,7 +2325,7 @@ async function uploadFakeForwardRecordTree(browserWindow, payload, options = {})
         uuid: payload.uuid,
         nestedProtocolItems
     });
-    const response = await invokeFakeForwardSso(browserWindow, upload);
+    const response = await invokeMessageSso(browserWindow, upload);
     if (isNativeFailure(response)) {
         throw new Error(`上传合并转发记录失败：${safeJson(response)}`);
     }
@@ -2337,7 +2360,7 @@ async function sendFakeForwardFromRenderer(browserWindow, payload) {
     const peerUin = await resolveFakeForwardPeerUin(browserWindow, upload.peer);
     const sendRequest = await buildFakeForwardSendRequest(upload, resId, { peerUin });
     const sendResponse = await parseFakeForwardSendResponse(
-        await invokeFakeForwardSso(browserWindow, sendRequest)
+        await invokeMessageSso(browserWindow, sendRequest)
     );
     if (sendResponse.result !== 0) {
         throw new Error(`发送合并转发卡片失败：${sendResponse.result}${
@@ -2541,6 +2564,145 @@ async function sendWindowShakeMessage(browserWindow, payload) {
     }
 }
 
+async function sendNativeMessagePacket(browserWindow, peer, type, content) {
+    const attrId = await generateMsgUniqueId(browserWindow, peer.chatType);
+    const result = await qqNativeInvoke(
+        browserWindow,
+        'ntApi',
+        NATIVE_SEND_COMMAND,
+        [buildNativeSendRequest(peer, type, content, makeSendAttributeInfos(attrId)), null],
+        true,
+        10000
+    );
+    const code = Number(result?.result);
+    if (isNativeFailure(result) || (Number.isFinite(code) && code !== 0)) {
+        throw new Error('QQ 未能发送消息');
+    }
+}
+
+async function sendDirectElementPacket(browserWindow, peer, elements) {
+    const response = await invokeMessageSso(browserWindow, buildDirectElementRequest(peer, elements));
+    if (isNativeFailure(response) || getDirectSendResult(response) !== 0) {
+        throw new Error('QQ 未能发送元素消息');
+    }
+}
+
+async function uploadLongMessagePacket(browserWindow, peer, peerUin, elements, options = {}) {
+    const response = await invokeMessageSso(
+        browserWindow,
+        buildLongMessageUploadRequest(peer, peerUin, elements, options)
+    );
+    return extractLongMessageResid(response);
+}
+
+async function sendMessagePacket(browserWindow, payload) {
+    if (getConfig().messageTweaks?.sendArkMessage !== true) {
+        return { ok: false, reason: 'disabled', message: '消息工具未启用' };
+    }
+    const peer = extractPeerFromRecord(browserWindow, payload?.peer || {});
+    if (![1, 2].includes(Number(peer?.chatType))) {
+        return { ok: false, reason: 'unsupported-peer', message: '当前会话不支持消息工具' };
+    }
+    const type = String(payload?.type || '').trim();
+    const method = String(payload?.method || 'direct').trim();
+    try {
+        if (type === 'ark' || type === 'text') {
+            await sendNativeMessagePacket(browserWindow, peer, type, payload?.content);
+            return { ok: true };
+        }
+
+        let elements;
+        if (type === 'xml') {
+            elements = createXmlElements(payload?.content);
+        } else if (type === 'element') {
+            elements = parseElementJson(payload?.content).elements;
+        } else {
+            throw new Error('不支持的消息类型');
+        }
+
+        if (type === 'element' && method === 'direct') {
+            await sendDirectElementPacket(browserWindow, peer, elements);
+            return { ok: true };
+        }
+
+        const peerUin = await resolveFakeForwardPeerUin(browserWindow, peer);
+        if (!peerUin) {
+            throw new Error(peer.chatType === 2 ? '无法获取当前群号' : '无法获取好友 QQ 号');
+        }
+
+        if (type === 'element' && method === 'forward') {
+            const forward = payload?.forward && typeof payload.forward === 'object'
+                ? payload.forward
+                : {};
+            const senderUin = normalizeUin(forward.senderUin || payload?.selfUin);
+            if (!senderUin) {
+                throw new Error('请输入转发消息的发送者 QQ 号');
+            }
+            const resid = await uploadLongMessagePacket(browserWindow, peer, peerUin, elements, {
+                forward: { ...forward, senderUin }
+            });
+            const card = createForwardCard(resid, forward);
+            if (card.longMessage) {
+                const cardResid = await uploadLongMessagePacket(
+                    browserWindow,
+                    peer,
+                    peerUin,
+                    card.elements
+                );
+                await sendDirectElementPacket(
+                    browserWindow,
+                    peer,
+                    createLongMessageReferenceElements(cardResid)
+                );
+            } else {
+                await sendDirectElementPacket(browserWindow, peer, card.elements);
+            }
+            return { ok: true };
+        }
+
+        const resid = await uploadLongMessagePacket(browserWindow, peer, peerUin, elements);
+        await sendDirectElementPacket(
+            browserWindow,
+            peer,
+            createLongMessageReferenceElements(resid)
+        );
+        return { ok: true };
+    } catch (error) {
+        warn('Message packet send failed:', error?.message || error);
+        return {
+            ok: false,
+            reason: 'send-failed',
+            message: error?.message || '消息发送失败'
+        };
+    }
+}
+
+async function pullMessagePacket(browserWindow, payload) {
+    if (getConfig().messageTweaks?.sendArkMessage !== true) {
+        return { ok: false, reason: 'disabled', message: '消息工具未启用' };
+    }
+    const record = payload?.record && typeof payload.record === 'object' ? payload.record : {};
+    try {
+        const request = buildPullMessageRequest(record);
+        const response = await invokeMessageSso(browserWindow, request);
+        recordDiagnostic('info', 'message-packet.sso-response-shape', {
+            command: request.command,
+            ...summarizeResponseShape(response)
+        });
+        return {
+            ok: true,
+            views: createPullMessageViews(response, payload?.msgRecord, request.command)
+        };
+    } catch (error) {
+        warn('Message packet pull failed:', error?.message || error);
+        return {
+            ok: false,
+            reason: 'pull-failed',
+            message: error?.message || '消息拉取失败'
+        };
+    }
+}
+
 function broadcastConfigChanged() {
     const config = clonePlain(configCache || DEFAULT_CONFIG);
     for (const browserWindow of BrowserWindow.getAllWindows()) {
@@ -2707,6 +2869,38 @@ async function rememberLocalSticker(filePath) {
         return { ...result, store: clonePlain(localStickerCache.store) };
     }
     return result;
+}
+
+async function deleteConfiguredLocalSticker(filePath) {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    if (!config.enabled || !config.path) {
+        return { ok: false, reason: 'disabled' };
+    }
+    const result = await deleteLocalSticker(config.path, filePath);
+    if (!result.ok) {
+        return result;
+    }
+    invalidateLocalStickerCache();
+    return {
+        ok: true,
+        store: await loadLocalStickerStore({ force: true })
+    };
+}
+
+async function deleteConfiguredLocalStickerPack(packPath) {
+    const config = normalizeLocalStickerConfig(getConfig().localStickers);
+    if (!config.enabled || !config.path) {
+        return { ok: false, reason: 'disabled' };
+    }
+    const result = await deleteLocalStickerPack(config.path, packPath);
+    if (!result.ok && !result.deleted) {
+        return result;
+    }
+    invalidateLocalStickerCache();
+    return {
+        ...result,
+        store: await loadLocalStickerStore({ force: true })
+    };
 }
 
 async function chooseLocalStickerDirectory(browserWindow) {
@@ -2953,13 +3147,25 @@ async function sendLocalSticker(browserWindow, payload) {
         return { ok: false, reason: 'invalid-sticker-path' };
     }
     try {
-        const picSubType = config.sendAsImage ? 0 : 1;
-        const imageElement = await createPicElement(browserWindow, stickerPath, {
-            picSubType,
-            summary: ''
-        }, {
-            allowOriginalHash: true
-        });
+        const isVideoSticker = path.extname(stickerPath).toLowerCase() === '.webm';
+        const configuredFfmpegPath = normalizeText(config.ffmpegPath || process.env.FFMPEG_PATH);
+        const stickerElement = isVideoSticker
+            ? await createVideoElement(browserWindow, stickerPath, {}, null, {
+                blurThumbnail: false,
+                ffmpegPath: configuredFfmpegPath,
+                ffprobePath: configuredFfmpegPath
+                    ? path.join(
+                        path.dirname(configuredFfmpegPath),
+                        process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'
+                    )
+                    : ''
+            })
+            : await createPicElement(browserWindow, stickerPath, {
+                picSubType: config.sendAsImage ? 0 : 1,
+                summary: ''
+            }, {
+                allowOriginalHash: true
+            });
         const attrId = await generateMsgUniqueId(browserWindow, chatType);
         const result = await qqNativeInvoke(
             browserWindow,
@@ -2974,7 +3180,7 @@ async function sendLocalSticker(browserWindow, payload) {
                     peerUin: normalizeUin(peer?.peerUin),
                     guildId: normalizeText(peer?.guildId)
                 },
-                msgElements: [imageElement],
+                msgElements: [stickerElement],
                 msgAttributeInfos: makeSendAttributeInfos(attrId)
             }, null],
             false
@@ -3304,6 +3510,44 @@ function installConfigIpc() {
             throw error;
         }
     });
+    ipcMain.handle(CHANNEL_SEND_MESSAGE_PACKET, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            return { ok: false, reason: 'window-not-found', message: '聊天窗口不可用' };
+        }
+        const summary = {
+            chatType: Number(payload?.peer?.chatType) || 0,
+            type: String(payload?.type || ''),
+            method: String(payload?.method || ''),
+            contentLength: String(payload?.content || '').length
+        };
+        recordDiagnostic('info', 'message-packet.requested', summary);
+        const result = await sendMessagePacket(browserWindow, payload);
+        recordDiagnostic(result.ok ? 'info' : 'warn', 'message-packet.completed', {
+            ...summary,
+            ok: result.ok === true,
+            reason: result.reason || ''
+        });
+        return result;
+    });
+    ipcMain.handle(CHANNEL_PULL_MESSAGE_PACKET, async (event, payload) => {
+        const browserWindow = BrowserWindow.fromWebContents(event.sender);
+        if (!browserWindow) {
+            return { ok: false, reason: 'window-not-found', message: '聊天窗口不可用' };
+        }
+        const summary = {
+            chatType: Number(payload?.record?.chatType) || 0,
+            msgId: String(payload?.record?.msgId || '')
+        };
+        recordDiagnostic('info', 'message-packet.pull-requested', summary);
+        const result = await pullMessagePacket(browserWindow, payload);
+        recordDiagnostic(result.ok ? 'info' : 'warn', 'message-packet.pull-completed', {
+            ...summary,
+            ok: result.ok === true,
+            reason: result.reason || ''
+        });
+        return result;
+    });
     ipcMain.handle(CHANNEL_CHOOSE_LOCAL_STICKER_DIRECTORY, event =>
         chooseLocalStickerDirectory(BrowserWindow.fromWebContents(event.sender))
     );
@@ -3323,6 +3567,23 @@ function installConfigIpc() {
             ok: result.ok === true,
             reason: result.reason || '',
             chatType: Number(payload?.peer?.chatType) || 0
+        });
+        return result;
+    });
+    ipcMain.handle(CHANNEL_DELETE_LOCAL_STICKER, async (_event, filePath) => {
+        const result = await deleteConfiguredLocalSticker(filePath);
+        recordDiagnostic(result.ok ? 'info' : 'warn', 'local-sticker.delete-completed', {
+            ok: result.ok === true,
+            reason: result.reason || ''
+        });
+        return result;
+    });
+    ipcMain.handle(CHANNEL_DELETE_LOCAL_STICKER_PACK, async (_event, packPath) => {
+        const result = await deleteConfiguredLocalStickerPack(packPath);
+        recordDiagnostic(result.ok ? 'info' : 'warn', 'local-sticker.delete-pack-completed', {
+            ok: result.ok === true,
+            reason: result.reason || '',
+            deleted: Number(result.deleted) || 0
         });
         return result;
     });
@@ -8091,7 +8352,7 @@ async function createPixelPreservingImageVariant(sourcePath) {
     return outPath;
 }
 
-async function probeMediaInfo(filePath) {
+async function probeMediaInfo(filePath, options = {}) {
     if (!voiceFileSender?.runTool) {
         throw new Error('FFmpeg tools are unavailable.');
     }
@@ -8100,7 +8361,7 @@ async function probeMediaInfo(filePath) {
         '-show_entries', 'format=duration:stream=codec_type,width,height,duration',
         '-of', 'json',
         filePath
-    ]);
+    ], { command: options.ffprobePath });
     const result = JSON.parse(stdout);
     const videoStream = result?.streams?.find(stream => stream.codec_type === 'video');
     const duration = Number(result?.format?.duration ?? videoStream?.duration);
@@ -8430,6 +8691,9 @@ async function createVideoThumbnail(filePath, originalThumbPath = '', options = 
         ];
         if (!hasOriginalThumb) {
             ffmpegArgs.push('-ss', '0');
+            if (path.extname(filePath).toLowerCase() === '.webm') {
+                ffmpegArgs.push('-c:v', 'libvpx-vp9');
+            }
         }
         ffmpegArgs.push(
             '-i', inputPath,
@@ -8451,7 +8715,9 @@ async function createVideoThumbnail(filePath, originalThumbPath = '', options = 
             ffmpegArgs.push('-q:v', '4');
         }
         ffmpegArgs.push(outPath);
-        await voiceFileSender.runTool('ffmpeg', ffmpegArgs);
+        await voiceFileSender.runTool('ffmpeg', ffmpegArgs, {
+            command: options.ffmpegPath
+        });
         const image = nativeImage.createFromPath(outPath);
         if (image.isEmpty()) {
             throw new Error('Generated blurred video thumbnail is invalid.');
@@ -8493,13 +8759,14 @@ async function cacheGeneratedVideoThumbnail(videoCachePath, videoMd5, thumbFileP
 }
 
 async function createVideoElement(browserWindow, filePath, originalVideoElement = {}, mediaInfo = null, options = {}) {
-    const info = mediaInfo || await probeMediaInfo(filePath);
+    const info = mediaInfo || await probeMediaInfo(filePath, options);
     if (!info.width || !info.height) {
         throw new Error('Video stream dimensions are unavailable.');
     }
     const originalThumbPath = getThumbPathCandidate(originalVideoElement.thumbPath);
     const generatedThumbPath = await createVideoThumbnail(filePath, originalThumbPath, {
-        blur: options.blurThumbnail !== false
+        blur: options.blurThumbnail !== false,
+        ffmpegPath: options.ffmpegPath
     });
     const cached = await copyMediaToQqCache(browserWindow, filePath, 5, originalVideoElement.fileName);
     const thumbFilePath = await cacheGeneratedVideoThumbnail(cached.filePath, cached.md5, generatedThumbPath);
