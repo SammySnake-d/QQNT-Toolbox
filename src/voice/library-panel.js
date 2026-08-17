@@ -2106,9 +2106,7 @@ function createVoiceLibraryPanel(options = {}) {
             title.textContent = payload.previewTitle || TEXT.item;
         }
         audio.src = payload.previewUrl;
-        if (!state.root.hidden) {
-            audio.play?.().catch(() => {});
-        }
+        audio.play?.().catch(() => {});
         syncPlayer();
     }
 
@@ -2686,7 +2684,7 @@ function createVoiceLibraryPanel(options = {}) {
         return true;
     }
 
-    function close() {
+    function close(options = {}) {
         if (!state.root) {
             return;
         }
@@ -2701,8 +2699,9 @@ function createVoiceLibraryPanel(options = {}) {
         closeDialog();
         closeItemMenu();
         state.root.querySelector('.qvlib-toast')?.remove();
-        const audio = state.root?.querySelector('audio');
-        audio?.pause?.();
+        if (options.pausePlayback === true) {
+            state.root.querySelector('audio')?.pause?.();
+        }
         syncPlayer();
         state.root.hidden = true;
         state.root.classList.remove('is-pointer-outside');

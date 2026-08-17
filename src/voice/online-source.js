@@ -2512,7 +2512,12 @@ async function downloadAudioUrl(url, options = {}) {
     const extension = inferAudioExtension(normalizedUrl, contentType);
     const requestedName = options.fileName || options.name || '';
     const baseName = sanitizeFileName(requestedName || path.basename(new URL(normalizedUrl).pathname, path.extname(new URL(normalizedUrl).pathname)) || `audio-${Date.now()}`);
-    const fileName = path.extname(baseName) ? baseName : `${baseName}${extension}`;
+    // Online song titles commonly contain dots such as "feat. artist". They
+    // are labels, not file extensions, so retain a suffix only when it matches
+    // the media type inferred from the response.
+    const fileName = baseName.toLowerCase().endsWith(extension)
+        ? baseName
+        : `${baseName}${extension}`;
     const target = ensureWithinRoot(root, path.join(root, fileName));
     const temporary = ensureWithinRoot(root, path.join(
         root,

@@ -638,6 +638,20 @@ test('downloads bounded audio into the requested root and infers its extension',
     assert.equal(path.dirname(result.path), path.resolve(root));
 });
 
+test('does not mistake a dotted song title for an audio file extension', async t => {
+    const root = await temporaryDirectory(t);
+    const result = await downloadAudioUrl('https://cdn.example.test/stream?id=1', {
+        rootPath: root,
+        fetch: async() => new Response(Buffer.from('ID3audio'), {
+            status: 200,
+            headers: { 'content-type': 'audio/mpeg' }
+        }),
+        fileName: 'time machine (feat. aren park)'
+    });
+    assert.equal(result.fileName, 'time machine (feat. aren park).mp3');
+    assert.equal(path.extname(result.path), '.mp3');
+});
+
 test('streams a download into a temporary file instead of buffering the full body', async t => {
     const root = await temporaryDirectory(t);
     let usedArrayBuffer = false;

@@ -2748,6 +2748,10 @@ function isSupportedMediaPath(filePath) {
     return MEDIA_EXTENSION_SET.has(path.extname(filePath).toLowerCase());
 }
 
+function isProcessableMediaPath(filePath) {
+    return isSupportedMediaPath(filePath) || Boolean(detectMediaInputFormat(filePath));
+}
+
 const windowStates = new WeakMap();
 const PTT_FORWARD_TTL_MS = 2 * 60 * 1000;
 
@@ -3347,7 +3351,7 @@ async function sendOriginalMediaPathAsPtt(browserWindow, peer, mediaPath, option
 
 async function sendMediaPathAsPtt(browserWindow, peer, mediaPath, options = {}) {
     peer = normalizeSendPeer(browserWindow, peer);
-    if (!isSupportedMediaPath(mediaPath) && !isSilkFile(mediaPath)) {
+    if (!isProcessableMediaPath(mediaPath) && !isSilkFile(mediaPath)) {
         throw new Error(`Unsupported audio or video file: ${mediaPath}`);
     }
     const sendMode = normalizeVoiceSendMode(options.sendMode);
@@ -3409,7 +3413,7 @@ async function sendLibraryItemAsPtt(browserWindow, peer, itemId, options = {}) {
     if (item.kind === 'ptt') {
         if (options.sendMode === 'original' && item.sourcePath &&
             fsSync.existsSync(normalizeStoredPath(item.sourcePath)) &&
-            isSupportedMediaPath(item.sourcePath)) {
+            isProcessableMediaPath(item.sourcePath)) {
             return await sendMediaPathAsPtt(browserWindow, peer, item.sourcePath, {
                 sendMode: 'original',
                 durationMs: Number(item.duration) > 0 ? Number(item.duration) * 1000 : undefined

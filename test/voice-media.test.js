@@ -27,7 +27,7 @@ function loadVoiceLibraryTestApi(dataDir) {
     const modulePath = path.join(__dirname, '..', 'src', 'voice-file-sender.js');
     const source = fs.readFileSync(modulePath, 'utf8').replace(
         'module.exports = {',
-        `module.exports = {\n    __libraryTest: {\n        ensureLibraryDirs,\n        getLibraryVoiceDir,\n        createLibraryFolder,\n        getLibraryFolders,\n        getLibraryItems,\n        moveLibraryItem,\n        renameLibraryItem,\n        deleteLibraryItem,\n        readLibraryIndex,\n        encodeLibraryItemId,\n        importOnlineSource,\n        setNetworkFetch,\n        getOnlineSourceState,\n        runOnlineSourceAction,\n        searchOnlineSource,\n        searchOnlineSources,\n        browseOnlineCatalog,\n        downloadOnlineSourceAudio,\n        isVoiceUiHostUrl,\n        getDirectPreviewFormat\n    },`
+        `module.exports = {\n    __libraryTest: {\n        ensureLibraryDirs,\n        getLibraryVoiceDir,\n        createLibraryFolder,\n        getLibraryFolders,\n        getLibraryItems,\n        moveLibraryItem,\n        renameLibraryItem,\n        deleteLibraryItem,\n        readLibraryIndex,\n        encodeLibraryItemId,\n        importOnlineSource,\n        setNetworkFetch,\n        getOnlineSourceState,\n        runOnlineSourceAction,\n        searchOnlineSource,\n        searchOnlineSources,\n        browseOnlineCatalog,\n        downloadOnlineSourceAudio,\n        isProcessableMediaPath,\n        isVoiceUiHostUrl,\n        getDirectPreviewFormat\n    },`
     );
     const testModule = new Module(modulePath, module);
     testModule.filename = modulePath;
@@ -118,6 +118,22 @@ test('detects audio bytes when QQ stores an original PTT with an image extension
         assert.equal(detectMediaInputFormat(filePath), expected, name);
         assert.deepEqual(getMediaInputArgs(filePath), ['-f', expected, '-i', filePath]);
     }
+});
+
+test('accepts media for sending from its bytes when the filename has no usable extension', async () => {
+    await withVoiceLibraryTestApi(async(library, { root }) => {
+        const noExtension = path.join(root, 'online-audio');
+        const misleadingExtension = path.join(root, 'online-audio.feat artist');
+        const textFile = path.join(root, 'not-media');
+        await Promise.all([
+            fsPromises.writeFile(noExtension, Buffer.from('ID3\x04\x00\x00audio', 'latin1')),
+            fsPromises.writeFile(misleadingExtension, Buffer.from('OggS\x00audio', 'latin1')),
+            fsPromises.writeFile(textFile, 'not audio')
+        ]);
+        assert.equal(library.isProcessableMediaPath(noExtension), true);
+        assert.equal(library.isProcessableMediaPath(misleadingExtension), true);
+        assert.equal(library.isProcessableMediaPath(textFile), false);
+    });
 });
 
 test('manages imported online voice sources through the main-process API', async () => {
@@ -1014,9 +1030,15 @@ test('renders the voice library as a direct file browser with contextual actions
     assert.match(panelSource, /const reopening = Boolean\(state\.root\?\.isConnected\);/);
     assert.match(panelSource, /state\.root = buildPanel\(\);[\s\S]*?renderViewControls\(\);/);
     assert.match(panelSource, /if \(!reopening\) \{[\s\S]*?emit\(\{ type: 'list' \}\);/);
-    assert.match(panelSource, /audio\?\.pause\?\.\(\);[\s\S]*?state\.root\.hidden = true;/);
+    const closePanelSource = panelSource.match(
+        /function close\(options = \{\}\) \{[\s\S]*?\n    \}\n\n    function handleEscape/
+    )[0];
+    assert.match(closePanelSource, /if \(options\.pausePlayback === true\) \{[\s\S]*?\.pause\?\.\(\);/);
+    assert.match(closePanelSource, /state\.root\.hidden = true;/);
+    assert.match(rendererSource, /closeLibraryPanel\(\{ pausePlayback: true \}\);/);
     assert.match(panelSource, /if \(state\.root\.hidden\) \{[\s\S]*?\.qvlib-toast[\s\S]*?return;/);
-    assert.match(panelSource, /audio\.src = payload\.previewUrl;[\s\S]*?if \(!state\.root\.hidden\) \{[\s\S]*?audio\.play/);
+    assert.match(panelSource, /audio\.src = payload\.previewUrl;[\s\S]*?audio\.play\?\.\(\)/);
+    assert.doesNotMatch(panelSource, /if \(!state\.root\.hidden\) \{[\s\S]*?audio\.play/);
     assert.doesNotMatch(panelSource, /state\.root\?\.remove\(\);[\s\S]*?state\.view = 'offline';/);
     assert.match(styleSource, /#qqnt-toolbox-voice-library\[hidden\] \{[\s\S]*?display: none !important;/);
     assert.match(styleSource, /\.qvlib-view-controls \{[\s\S]*?flex: none;/);

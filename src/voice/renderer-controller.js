@@ -427,8 +427,8 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
         return libraryPanel?.open();
     }
 
-    function closeLibraryPanel() {
-        libraryPanel?.close();
+    function closeLibraryPanel(options) {
+        libraryPanel?.close(options);
     }
 
     function updateLibraryPanelPlacement() {
@@ -478,7 +478,7 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
 
     function openLibraryPanelDebounced() {
         if (!isVoiceFeatureEnabled()) {
-            closeLibraryPanel();
+            closeLibraryPanel({ pausePlayback: true });
             return;
         }
         const bridge = getBridge();
@@ -1863,7 +1863,7 @@ function injectedVoiceFileSenderUi(voiceLibraryPanelFactory, voiceLibraryPanelCs
     bridge.setEnabled = enabled => {
         bridge.enabled = enabled === true;
         if (!bridge.enabled) {
-            closeLibraryPanel();
+            closeLibraryPanel({ pausePlayback: true });
             bridge.compatiblePttPlayback = null;
             bridge.compatiblePttSources?.clear?.();
             for (const mediaId of bridge.compatiblePttMedia?.keys?.() || []) {
