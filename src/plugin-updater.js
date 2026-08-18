@@ -14,6 +14,7 @@ const {
 const DEFAULT_REPOSITORY = 'MeiYongAI/QQNT-Toolbox';
 const DEFAULT_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const MAX_API_BYTES = 2 * 1024 * 1024;
+const MAX_PUBLIC_RELEASE_PAGE_BYTES = 4 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = 128 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 512;
@@ -72,7 +73,7 @@ function compareVersions(left, right) {
     });
 }
 
-function normalizeGitHubRelease(value, repository = DEFAULT_REPOSITORY) {
+function normalizeGitHubRelease(value, repository = DEFAULT_REPOSITORY, options = {}) {
     if (!value || value.draft === true) {
         throw createUpdaterError('invalid-release-response');
     }
@@ -86,8 +87,9 @@ function normalizeGitHubRelease(value, repository = DEFAULT_REPOSITORY) {
         : null;
     const size = Number(asset?.size);
     const downloadUrl = String(asset?.browser_download_url || '');
+    const allowUnknownSize = options.allowUnknownSize === true;
     if (!asset || !downloadUrl.startsWith('https://') || !Number.isSafeInteger(size) ||
-        size <= 0 || size > MAX_ARCHIVE_BYTES) {
+        (size <= 0 && !allowUnknownSize) || size > MAX_ARCHIVE_BYTES) {
         throw createUpdaterError('invalid-release-asset');
     }
     const digestText = String(asset.digest || '').trim();
@@ -191,7 +193,8 @@ function requestBuffer(url, options = {}, redirectCount = 0) {
             response.once('end', () => resolve({
                 statusCode,
                 headers: response.headers,
-                body: Buffer.concat(chunks)
+                body: Buffer.concat(chunks),
+                url: parsedUrl.toString()
             }));
         });
         request.setTimeout(Number(options.timeoutMs) || 20000, () => {
@@ -307,7 +310,8 @@ async function requestBufferWithFetch(fetchImpl, url, options = {}) {
                 response,
                 Number(options.maxBytes) || MAX_API_BYTES,
                 controller
-            )
+            ),
+            url: finalUrl.toString()
         };
     } catch (error) {
         if (error?.reason) {
@@ -320,6 +324,85 @@ async function requestBufferWithFetch(fetchImpl, url, options = {}) {
     } finally {
         clearTimeout(timer);
     }
+}
+
+function getPublicReleaseTag(response, repository) {
+    const candidates = [String(response?.url || '')];
+    const body = Buffer.isBuffer(response?.body)
+        ? response.body.toString('utf8')
+        : String(response?.body || '');
+    const encodedRepository = String(repository || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const bodyPattern = new RegExp(
+        `https://(?:www\\.)?github\\.com/${encodedRepository}/releases/tag/([^\\s"'<>?#]+)`,
+        'i'
+    );
+    const bodyMatch = body.match(bodyPattern);
+    if (bodyMatch) {
+        candidates.push(`https://github.com/${repository}/releases/tag/${bodyMatch[1]}`);
+    }
+    const expectedPrefix = `/${repository}/releases/tag/`.toLowerCase();
+    for (const candidate of candidates) {
+        let parsed;
+        try {
+            parsed = new URL(candidate);
+        } catch {
+            continue;
+        }
+        if (!['github.com', 'www.github.com'].includes(parsed.hostname.toLowerCase())) {
+            continue;
+        }
+        const pathname = parsed.pathname;
+        if (!pathname.toLowerCase().startsWith(expectedPrefix)) {
+            continue;
+        }
+        const rawTag = pathname.slice(expectedPrefix.length).split('/')[0];
+        const tag = decodeURIComponent(rawTag || '').trim();
+        if (normalizeVersion(tag)) {
+            return tag;
+        }
+    }
+    return '';
+}
+
+async function requestPublicLatestReleaseWith(request, repository) {
+    const response = await request(
+        `https://github.com/${repository}/releases/latest`,
+        {
+            headers: {
+                Accept: 'text/html,application/xhtml+xml',
+                'User-Agent': 'QQNT-Toolbox-Updater'
+            },
+            maxBytes: MAX_PUBLIC_RELEASE_PAGE_BYTES
+        }
+    );
+    if (response.statusCode !== 200) {
+        throw createUpdaterError('public-release-request-failed');
+    }
+    const tag = getPublicReleaseTag(response, repository);
+    const version = normalizeVersion(tag)?.value;
+    if (!version) {
+        throw createUpdaterError('public-release-version-missing');
+    }
+    const assetName = `QQNT-Toolbox-v${version}.zip`;
+    const encodedTag = encodeURIComponent(tag);
+    const encodedAssetName = encodeURIComponent(assetName);
+    return {
+        notModified: false,
+        etag: '',
+        source: 'public',
+        release: {
+            tag_name: tag,
+            html_url: `https://github.com/${repository}/releases/tag/${encodedTag}`,
+            draft: false,
+            assets: [{
+                name: assetName,
+                browser_download_url:
+                    `https://github.com/${repository}/releases/download/${encodedTag}/${encodedAssetName}`,
+                size: 0,
+                digest: ''
+            }]
+        }
+    };
 }
 
 async function requestLatestReleaseWith(request, {
@@ -338,18 +421,40 @@ async function requestLatestReleaseWith(request, {
     if (etag) {
         headers['If-None-Match'] = etag;
     }
-    const response = await request(
-        `https://api.github.com/repos/${repository}/releases/latest`,
-        { headers, maxBytes: MAX_API_BYTES }
-    );
+    let response;
+    try {
+        response = await request(
+            `https://api.github.com/repos/${repository}/releases/latest`,
+            { headers, maxBytes: MAX_API_BYTES }
+        );
+    } catch (error) {
+        if (!String(token || '').trim()) {
+            try {
+                return await requestPublicLatestReleaseWith(request, repository);
+            } catch {
+                // Keep the API error when the public fallback is unavailable.
+            }
+        }
+        throw error;
+    }
     if (response.statusCode === 304) {
         return { notModified: true, etag: String(response.headers.etag || etag) };
     }
     if (response.statusCode === 401) {
         throw createUpdaterError('invalid-github-token');
     }
-    if (response.statusCode === 403 && String(response.headers['x-ratelimit-remaining'] || '') === '0') {
-        throw createUpdaterError('github-rate-limited');
+    if ([403, 429].includes(response.statusCode)) {
+        if (!String(token || '').trim()) {
+            try {
+                return await requestPublicLatestReleaseWith(request, repository);
+            } catch {
+                // Keep the existing actionable error when the public fallback is unavailable.
+            }
+        }
+        if (response.statusCode === 429 || String(response.headers['x-ratelimit-remaining'] || '') === '0') {
+            throw createUpdaterError('github-rate-limited');
+        }
+        throw createUpdaterError('release-request-failed');
     }
     if (response.statusCode !== 200) {
         throw createUpdaterError('release-request-failed');
@@ -581,7 +686,7 @@ function isUsableCachedRelease(value) {
         value.asset?.name === `QQNT-Toolbox-v${version}.zip` &&
         String(value.asset?.url || '').startsWith('https://') &&
         (!value.asset?.sha256 || /^[0-9a-f]{64}$/i.test(String(value.asset.sha256))) &&
-        Number.isSafeInteger(Number(value.asset?.size)) && Number(value.asset.size) > 0
+        Number.isSafeInteger(Number(value.asset?.size)) && Number(value.asset.size) >= 0
     );
 }
 
@@ -791,7 +896,9 @@ function createPluginUpdater(options = {}) {
                 });
                 const release = response?.notModified
                     ? cachedRelease
-                    : normalizeGitHubRelease(response?.release, repository);
+                    : normalizeGitHubRelease(response?.release, repository, {
+                        allowUnknownSize: response?.source === 'public'
+                    });
                 if (!release) {
                     throw createUpdaterError('missing-release-cache');
                 }
@@ -845,7 +952,9 @@ function createPluginUpdater(options = {}) {
                     destination: archivePath,
                     mirrorUrl: String(network.githubMirror || '')
                 });
-                if (Number(download?.size) !== release.asset.size ||
+                const expectedSize = Number(release.asset.size);
+                if (!Number.isSafeInteger(Number(download?.size)) || Number(download.size) <= 0 ||
+                    (expectedSize > 0 && Number(download.size) !== expectedSize) ||
                     (release.asset.sha256 && String(download?.sha256 || '').toLowerCase() !== release.asset.sha256)) {
                     await fs.rm(archivePath, { force: true });
                     throw createUpdaterError('asset-verification-failed');

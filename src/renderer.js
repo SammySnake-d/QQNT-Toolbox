@@ -2750,7 +2750,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             ]),
             createSection('updater', text('插件更新'), [
                 createSwitchItem(text('启动时检查更新'), text('每 12 小时最多检查一次'), 'updater.checkOnStartup'),
-                createActionItem(text('检查更新'), text('通过 GitHub Releases API 检查，默认匿名访问'), 'checkPluginUpdate', {
+                createActionItem(text('检查更新'), text('优先使用 GitHub API；匿名限流时自动从公开 Release 获取版本'), 'checkPluginUpdate', {
                     label: text('检查'),
                     updateRole: 'check'
                 }),
@@ -2880,7 +2880,7 @@ body.qqnt-toolbox-remove-vip-color .aio .chat-header .panel-header__title .chat-
             case 'error': {
                 const messages = {
                     'unsupported-platform': text('当前系统暂不支持自动安装'),
-                    'github-rate-limited': text('GitHub 匿名请求已达限额，可填写令牌后重试'),
+                    'github-rate-limited': text('GitHub API 匿名请求已达限额，公开 Release 回退也不可用；填写令牌或检查网络/代理后重试'),
                     'invalid-github-token': text('GitHub 令牌无效，请检查后重试'),
                     'invalid-proxy-url': text('代理地址无效，请检查网络设置'),
                     'invalid-mirror-url': text('GitHub 镜像地址无效，请检查网络设置'),

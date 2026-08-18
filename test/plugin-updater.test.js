@@ -35,13 +35,14 @@ const REQUIRED_TEST_PLUGIN_FILES = [
     'src/update-bootstrap.js'
 ];
 
-function makeFetchResponse(status, body = '', headers = {}) {
+function makeFetchResponse(status, body = '', headers = {}, url = '') {
     const bytes = Buffer.isBuffer(body) ? body : Buffer.from(body);
     const normalizedHeaders = new Map(
         Object.entries(headers).map(([name, value]) => [name.toLowerCase(), String(value)])
     );
     return {
         status,
+        url,
         headers: {
             get: name => normalizedHeaders.get(String(name).toLowerCase()) || null,
             entries: () => normalizedHeaders.entries()
@@ -224,6 +225,92 @@ test('reports GitHub anonymous rate limiting distinctly', async () => {
         makeFetchResponse(403, '{}', { 'x-ratelimit-remaining': '0' })
     );
     await assert.rejects(transport.requestLatestRelease(), { reason: 'github-rate-limited' });
+});
+
+test('falls back to the public release page when anonymous API access is rate-limited', async () => {
+    const archive = Buffer.from('public release archive');
+    const requests = [];
+    const transport = createFetchUpdateTransport(async (url, options) => {
+        requests.push({ url, headers: { ...(options.headers || {}) } });
+        if (url.startsWith('https://api.github.com/')) {
+            return makeFetchResponse(403, '{}', { 'x-ratelimit-remaining': '0' });
+        }
+        return makeFetchResponse(
+            200,
+            '<html><meta property="og:url" content="https://github.com/MeiYongAI/QQNT-Toolbox/releases/tag/v0.8.9"></html>',
+            {},
+            'https://github.com/MeiYongAI/QQNT-Toolbox/releases/tag/v0.8.9'
+        );
+    });
+
+    const checked = await transport.requestLatestRelease();
+    const release = normalizeGitHubRelease(checked.release, undefined, {
+        allowUnknownSize: checked.source === 'public'
+    });
+    assert.equal(checked.source, 'public');
+    assert.equal(release.version, '0.8.9');
+    assert.equal(release.asset.size, 0);
+    assert.match(release.asset.url, /releases\/download\/v0\.8\.9\/QQNT-Toolbox-v0\.8\.9\.zip$/);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].headers.Authorization, undefined);
+});
+
+test('falls back to the public release page when the anonymous API is unreachable', async () => {
+    const transport = createFetchUpdateTransport(async url => {
+        if (url.startsWith('https://api.github.com/')) {
+            throw Object.assign(new Error('API unavailable'), { reason: 'network-request-failed' });
+        }
+        return makeFetchResponse(
+            200,
+            '',
+            {},
+            'https://github.com/MeiYongAI/QQNT-Toolbox/releases/tag/v0.8.9'
+        );
+    });
+
+    const checked = await transport.requestLatestRelease();
+    assert.equal(checked.source, 'public');
+    assert.equal(checked.release.tag_name, 'v0.8.9');
+});
+
+test('prepares a public-page update without a known asset size', async () => {
+    await withTemporaryDirectory(async directory => {
+        const pluginRoot = path.join(directory, 'plugins', 'QQNT-Toolbox');
+        const dataDir = path.join(directory, 'data');
+        const archive = Buffer.from('public archive without metadata');
+        const raw = makeGitHubRelease('0.8.9', archive);
+        raw.assets[0].size = 0;
+        raw.assets[0].digest = '';
+        await writeTestPlugin(pluginRoot, '0.8.8', 'old');
+
+        const updater = createPluginUpdater({
+            currentVersion: '0.8.8',
+            pluginRoot,
+            dataDir,
+            bootstrapSource: path.join(pluginRoot, 'src', 'update-bootstrap.js'),
+            platform: 'win32',
+            requestLatestRelease: async () => ({
+                source: 'public',
+                release: raw,
+                etag: ''
+            }),
+            downloadPluginArchive: async options => {
+                await fs.mkdir(path.dirname(options.destination), { recursive: true });
+                await fs.writeFile(options.destination, archive);
+                return {
+                    size: archive.length,
+                    sha256: crypto.createHash('sha256').update(archive).digest('hex')
+                };
+            },
+            extractPluginArchive: async ({ destination, expectedVersion }) => {
+                await writeTestPlugin(destination, expectedVersion, 'new');
+                return destination;
+            }
+        });
+
+        assert.equal((await updater.checkForUpdates({ force: true })).status, 'available');
+        assert.equal((await updater.prepareUpdate()).status, 'ready');
+    });
 });
 
 test('uses one optional proxy address for updates and sticker downloads', async () => {
