@@ -138,6 +138,7 @@ class MacClosedLidHelper {
             this.requested = false;
             return;
         }
+        await fsp.mkdir(this.dataDir, { recursive: true });
         const temporaryPath = `${this.requestPath}.tmp-${this.pid}`;
         const content = `active=1\npid=${this.pid}\nupdatedAt=${Date.now()}\n`;
         await fsp.writeFile(temporaryPath, content, { mode: 0o600 });
@@ -154,6 +155,7 @@ class MacClosedLidHelper {
             this.requested = false;
             return true;
         }
+        fs.mkdirSync(this.dataDir, { recursive: true });
         const temporaryPath = `${this.requestPath}.tmp-${this.pid}`;
         fs.writeFileSync(temporaryPath, `active=1\npid=${this.pid}\nupdatedAt=${Date.now()}\n`, {
             mode: 0o600
