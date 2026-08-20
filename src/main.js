@@ -5997,6 +5997,9 @@ async function resolvePreservationAssetSource(browserWindow, candidate, asset, d
             existing = '';
         }
     }
+    if (asset.kind === 'image' && !candidate.recalled) {
+        return null;
+    }
     const payload = createPreservationDownloadPayload(candidate.record, element, media, destinationPath);
     if (!payload) {
         throw new Error('The message asset download identity is incomplete.');
@@ -6136,6 +6139,10 @@ function queuePreservationAsset(browserWindow, recallState, candidateKey, assetI
                 asset,
                 admission.acquisitionPath
             );
+            if (!sourcePath) {
+                recallState.staging?.discardAsset(candidateKey, assetId);
+                return { ok: false, reason: 'deferred-to-render', state: 'skipped', path: '' };
+            }
             if (recallState.generation !== generation ||
                 recallStates.get(recallState.accountUin) !== recallState) {
                 if (recallState.staging?.isOwnedAcquisitionPath(sourcePath)) {
