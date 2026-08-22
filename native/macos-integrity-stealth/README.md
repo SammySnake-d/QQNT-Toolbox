@@ -14,8 +14,15 @@
 
 1. **签名校验绕过** — interpose `SecCodeCheckValidity` / `SecStaticCodeCheckValidity`，强制返回 `errSecSuccess`。
 2. **TeamID 注入** — interpose `SecCodeCopySigningInformation`，回填官方 `teamid=FN2V63AD2J` 与 `identifier=com.tencent.qq`。
-3. **VFS 文件重定向** — interpose `open`/`openat`/`fopen`/`stat`/`lstat`，把对 `app_launcher/index.js`、`Resources/app/package.json` 的读取透明重定向到未修改的官方镜像（`/tmp/qq_stock_mirror/`）。
-4. **落盘插桩** — 每次上述 hook 被真实调用都写入 `/tmp/native_stealth_hits.log`，用于活体验证与定位真实检测点。
+3. **VFS 文件重定向** — interpose `open`/`openat`/`fopen`/`stat`/`lstat`，把对 `app_launcher/index.js`、`Resources/app/package.json` 的读取透明重定向到未修改的官方镜像。
+4. **落盘插桩** — 每次上述 hook 被真实调用都写入 `hits.log`，用于活体验证与定位真实检测点。
+
+### 路径（持久化，不依赖 /tmp）
+
+dylib 在加载时按 `$HOME` 计算所有路径，**不写死用户名、不用 `/tmp`（`/tmp` 会被系统定期清理/重启清空，早期版本因此重启后失效）**：
+
+- 官方纯净镜像：`$HOME/LiteLoaderQQNT/native_stealth/stock_mirror/`
+- 插桩日志：`$HOME/LiteLoaderQQNT/native_stealth/hits.log`
 
 ## 踩过的坑（关键）
 
@@ -33,16 +40,13 @@ zsh build.sh
 zsh start_qq.sh
 ```
 
-`start_qq.sh` 里的 dylib 路径需指向本目录编译产物；`ensure_stock_mirror.sh` 负责从 `/Applications/QQ.app` 抽取官方原版 `package.json` / `index.js` 到 `/tmp/qq_stock_mirror/`。
+`start_qq.sh` / dylib / 镜像脚本默认都放在 `$HOME/LiteLoaderQQNT/native_stealth/`，路径按 `$HOME` 自动解析；`ensure_stock_mirror.sh` 负责从 `/Applications/QQ.app` 抽取官方原版 `package.json` / `index.js` 到持久镜像目录。
 
 ## 验证
 
 ```sh
-# dylib 是否真注入某进程
-vmmap <pid> | grep native_stealth
-
-# QQ 真实调用了哪些完整性 API
-cat /tmp/native_stealth_hits.log
+vmmap <pid> | grep native_stealth            # dylib 是否真注入
+cat $HOME/LiteLoaderQQNT/native_stealth/hits.log   # QQ 真实调用了哪些完整性 API
 ```
 
 ## 边界
